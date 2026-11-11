@@ -18,6 +18,7 @@ than controlling a user's application.
 | Native overlay | target-relative click-through, focus-aware, capture-excluded | implemented on Windows when explicitly constructed |
 | Tray | per-script icon, independent pause/edit/exit/hotkeys controls, dormant/running colors | started by `run`/`rpc`; `--no-tray` disables it; `rhk tray` provides global controls |
 | Bot workspace | loopback UI, bounded handoffs, provider adapters, vault-backed keys | implemented in Python package; see [bots.md](bots.md) |
+| Input monitor | keyboard/mouse graphic, successful native output, simulated actions, optional focused-page capture | bounded memory-only telemetry; see [keyboard.md](keyboard.md) |
 
 No capability implies a default target, default HUD, private profile, macro, calibration, or game-specific behavior. Do not claim a native/live check passed unless you ran it on the relevant Windows setup; repository tests and dry runs do not prove live input safety.
 

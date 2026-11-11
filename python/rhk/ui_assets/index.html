@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>RHK BOT</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="keyboard.css">
 </head>
 <body>
   <div class="app-shell">
@@ -21,7 +22,7 @@
     <main class="workspace">
       <header class="topbar">
         <div><p class="eyebrow">WORKSPACE / <span id="active-bot-label">MASTER</span></p><h1 id="active-bot-name">Master</h1></div>
-        <div class="top-actions"><span id="run-status" class="run-status idle"><span class="status-dot"></span>Idle</span><button id="context-toggle" class="ghost-button" type="button" aria-expanded="true">Context</button></div>
+        <div class="top-actions"><span id="run-status" class="run-status idle"><span class="status-dot"></span>Idle</span><button id="keyboard-open" class="ghost-button" type="button">Keyboard</button><button id="context-toggle" class="ghost-button" type="button" aria-expanded="true">Context</button></div>
       </header>
       <section id="notice" class="notice" role="status" hidden></section>
       <section id="transcript" class="transcript" aria-live="polite" aria-label="Chat transcript"></section>
@@ -48,6 +49,14 @@
       <section id="bot-settings" class="settings-section"><h3>Bot profile</h3><div class="form-grid"><label>Name<input id="bot-name" required></label><label>Role<input id="bot-role" required></label><label>Provider<select id="bot-provider"></select></label><label>Model<input id="bot-model" required></label></div><fieldset><legend>Portrait</legend><div id="portrait-gallery" class="portrait-gallery"></div></fieldset><fieldset><legend>Accent ring</legend><div id="accent-gallery" class="accent-gallery"></div></fieldset><label class="checkbox-label"><input id="bot-allow-mutating" type="checkbox"> Allow action tools</label><div class="settings-actions"><button id="save-bot" class="primary-button" type="button">Save bot</button><button id="delete-bot" class="danger-button" type="button">Delete bot</button></div></section>
     </form>
   </dialog>
+  <dialog id="keyboard-dialog" class="keyboard-dialog" aria-labelledby="keyboard-title">
+    <header class="keyboard-heading"><div><p class="eyebrow">INPUT MONITOR</p><h2 id="keyboard-title">Keyboard &amp; mouse</h2><p class="muted">Watch script events and optional input while this panel is focused.</p></div><button id="keyboard-close" class="icon-button" type="button" aria-label="Close keyboard monitor">×</button></header>
+    <div class="keyboard-controls"><label class="keyboard-capture"><input id="keyboard-capture" type="checkbox"> Capture focused page input</label><button id="keyboard-demo" class="secondary-button" type="button">Play simulated demo</button><button id="keyboard-clear" class="secondary-button" type="button">Clear display</button><button id="keyboard-reset" class="secondary-button" type="button">Reset demo / local</button><span id="keyboard-status" role="status">Connecting…</span></div>
+    <p class="keyboard-hint">Capture stays in this page and excludes text fields and controls. Select the keyboard surface, then press keys.</p>
+    <div id="keyboard-surface" class="keyboard-surface" tabindex="0" aria-label="Keyboard input surface"><div id="keyboard-layout" class="keyboard-layout" aria-label="Keyboard visualization"></div><div id="keyboard-numpad" class="keyboard-numpad" aria-label="Numeric keypad"></div><div id="keyboard-mouse" class="keyboard-mouse" aria-label="Mouse buttons"></div></div>
+    <div class="keyboard-info"><section><div class="keyboard-section-title"><h3>Held</h3><span id="keyboard-held-count">0</span></div><p id="keyboard-held" class="keyboard-held">No keys held</p></section><section><div class="keyboard-section-title"><h3>Event timeline</h3><span id="keyboard-drop-count">No gaps</span></div><ol id="keyboard-timeline" class="keyboard-timeline" aria-live="polite"></ol></section></div>
+  </dialog>
   <script src="app.js"></script>
+  <script src="keyboard.js"></script>
 </body>
 </html>

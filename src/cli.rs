@@ -265,6 +265,15 @@ fn dispatch<B: Backend>(engine: &mut Engine<B>, request: &Value) -> Result<Value
             engine.set_hotkeys_enabled(field(request, "enabled")?);
             Ok(engine.status())
         }
+        "input_events" => {
+            let after = match request.get("after") {
+                None => 0,
+                Some(value) => value
+                    .as_u64()
+                    .ok_or("after must be a nonnegative integer")?,
+            };
+            Ok(engine.input_events(after))
+        }
         "tick" => {
             engine.tick()?;
             Ok(engine.status())
@@ -698,6 +707,11 @@ fn overlay_command(args: &[String]) -> Result<()> {
 fn tool_catalog() -> Value {
     let runtime = [
         ("status", json!({}), false),
+        (
+            "input_events",
+            json!({"after":{"type":"integer","minimum":0}}),
+            false,
+        ),
         ("arm", json!({}), true),
         ("pause", json!({}), false),
         ("abort", json!({}), false),
@@ -855,6 +869,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rhk-cli-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let mut session = RpcSession::new(Engine::new(Fake, profile, dir.clone()).unwrap());
+        assert_eq!(
+            session.dispatch(&json!({"op":"input_events"})).unwrap()["last_sequence"],
+            0
+        );
+        assert!(
+            session
+                .dispatch(&json!({"op":"input_events","after":-1}))
+                .is_err()
+        );
         assert_eq!(
             session.dispatch(&json!({"op":"status"})).unwrap()["present"],
             false

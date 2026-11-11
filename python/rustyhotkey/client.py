@@ -213,6 +213,7 @@ class Client:
             with self._lock: self._responses.pop(request_id, None)
 
     def status(self) -> Any: return self.request("status")
+    def input_events(self, after: int = 0) -> Any: return self.request("input_events", after=after)
     def arm(self) -> Any: return self.request("arm")
     def pause(self) -> Any: return self.request("pause")
     def abort(self) -> Any: return self.request("abort")

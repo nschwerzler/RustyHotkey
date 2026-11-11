@@ -1,7 +1,7 @@
 use crate::{Backend, Result, model::*};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     path::PathBuf,
     sync::{
@@ -215,6 +215,8 @@ pub struct Engine<B: Backend> {
     hotkeys_enabled: bool,
     dormant: bool,
     pause_marker: Vec<u8>,
+    input_events: VecDeque<Value>,
+    input_sequence: u64,
     last_tick: Option<Instant>,
 }
 
@@ -249,6 +251,8 @@ impl<B: Backend> Engine<B> {
             hotkeys_enabled: true,
             dormant,
             pause_marker,
+            input_events: VecDeque::with_capacity(512),
+            input_sequence: 0,
             last_tick: None,
         })
     }
@@ -350,7 +354,7 @@ impl<B: Backend> Engine<B> {
         let buttons: Vec<_> = self.held_buttons.iter().copied().collect();
         let mut first = None;
         for key in keys {
-            if let Err(e) = self.backend.emit(&InputEvent::Key { key, down: false }) {
+            if let Err(e) = self.emit_input(&InputEvent::Key { key, down: false }) {
                 if first.is_none() {
                     first = Some(e);
                 }
@@ -359,7 +363,7 @@ impl<B: Backend> Engine<B> {
             }
         }
         for button in buttons {
-            if let Err(e) = self.backend.emit(&InputEvent::Button {
+            if let Err(e) = self.emit_input(&InputEvent::Button {
                 button,
                 down: false,
             }) {
@@ -371,6 +375,56 @@ impl<B: Backend> Engine<B> {
             }
         }
         first.map_or(Ok(()), Err)
+    }
+    fn record_event(&mut self, kind: &str, key: Option<u16>) {
+        self.input_sequence = self.input_sequence.wrapping_add(1);
+        let mut event = json!({"sequence": self.input_sequence, "kind": kind, "at_ms": now_ms()});
+        if let Some(key) = key {
+            event["key"] = Value::String(key_name(key));
+        }
+        if self.input_events.len() == 512 {
+            self.input_events.pop_front();
+        }
+        self.input_events.push_back(event);
+    }
+    fn emit_input(&mut self, event: &InputEvent) -> Result<()> {
+        self.backend.emit(event)?;
+        match event {
+            InputEvent::Key { key, down } => {
+                self.record_event(if *down { "down" } else { "up" }, Some(*key))
+            }
+            InputEvent::Button { button, down } => self.record_event(
+                if *down { "down" } else { "up" },
+                Some(0x100 + *button as u16),
+            ),
+            _ => {}
+        }
+        Ok(())
+    }
+    pub fn input_events(&self, after: u64) -> Value {
+        let events: Vec<_> = self
+            .input_events
+            .iter()
+            .filter(|e| {
+                e.get("sequence")
+                    .and_then(Value::as_u64)
+                    .map_or(false, |n| n > after)
+            })
+            .cloned()
+            .collect();
+        let oldest = self
+            .input_events
+            .front()
+            .and_then(|e| e.get("sequence"))
+            .and_then(Value::as_u64)
+            .unwrap_or(self.input_sequence.saturating_add(1));
+        let mut held: Vec<_> = self.held_keys.iter().map(|k| key_name(*k)).collect();
+        held.extend(
+            self.held_buttons
+                .iter()
+                .map(|b| key_name(0x100 + *b as u16)),
+        );
+        json!({"events": events, "last_sequence": self.input_sequence, "oldest_sequence": oldest, "truncated": after.saturating_add(1) < oldest || after > self.input_sequence, "held": held, "limit": 512})
     }
     pub fn abort(&mut self) -> Result<()> {
         self.abort_latched = true;
@@ -493,20 +547,20 @@ impl<B: Backend> Engine<B> {
             self.before_input()?;
             match action {
                 Action::Tap { key } => {
-                    self.backend.emit(&InputEvent::Key {
+                    self.emit_input(&InputEvent::Key {
                         key: *key,
                         down: true,
                     })?;
                     self.held_keys.insert(*key);
                     self.before_input()?;
-                    self.backend.emit(&InputEvent::Key {
+                    self.emit_input(&InputEvent::Key {
                         key: *key,
                         down: false,
                     })?;
                     self.held_keys.remove(key);
                 }
                 Action::Key { key, down } => {
-                    self.backend.emit(&InputEvent::Key {
+                    self.emit_input(&InputEvent::Key {
                         key: *key,
                         down: *down,
                     })?;
@@ -516,22 +570,22 @@ impl<B: Backend> Engine<B> {
                         self.held_keys.remove(key);
                     }
                 }
-                Action::Move { x, y } => self.backend.emit(&InputEvent::Move { x: *x, y: *y })?,
+                Action::Move { x, y } => self.emit_input(&InputEvent::Move { x: *x, y: *y })?,
                 Action::Click { button } => {
-                    self.backend.emit(&InputEvent::Button {
+                    self.emit_input(&InputEvent::Button {
                         button: *button,
                         down: true,
                     })?;
                     self.held_buttons.insert(*button);
                     self.before_input()?;
-                    self.backend.emit(&InputEvent::Button {
+                    self.emit_input(&InputEvent::Button {
                         button: *button,
                         down: false,
                     })?;
                     self.held_buttons.remove(button);
                 }
                 Action::Button { button, down } => {
-                    self.backend.emit(&InputEvent::Button {
+                    self.emit_input(&InputEvent::Button {
                         button: *button,
                         down: *down,
                     })?;
@@ -664,6 +718,39 @@ fn contains_key_condition(c: &Condition) -> bool {
         }
         Condition::Not { condition } => contains_key_condition(condition),
         _ => false,
+    }
+}
+fn key_name(key: u16) -> String {
+    if (0x101..=0x105).contains(&key) {
+        return format!("Mouse{}", key - 0x100);
+    }
+    match key {
+        0x41..=0x5a => format!("Key{}", char::from_u32(key as u32).unwrap_or('?')),
+        0x30..=0x39 => format!("Digit{}", key - 0x30),
+        0x70..=0x87 => format!("F{}", key - 0x6f),
+        0x10 => "ShiftLeft".into(),
+        0x11 => "ControlLeft".into(),
+        0x12 => "AltLeft".into(),
+        0x20 => "Space".into(),
+        0x1b => "Escape".into(),
+        0x0d => "Enter".into(),
+        0x09 => "Tab".into(),
+        0x25 => "ArrowLeft".into(),
+        0x26 => "ArrowUp".into(),
+        0x27 => "ArrowRight".into(),
+        0x28 => "ArrowDown".into(),
+        0xba => "Semicolon".into(),
+        0xbb => "Equal".into(),
+        0xbc => "Comma".into(),
+        0xbd => "Minus".into(),
+        0xbe => "Period".into(),
+        0xbf => "Slash".into(),
+        0xc0 => "Backquote".into(),
+        0xdb => "BracketLeft".into(),
+        0xdc => "Backslash".into(),
+        0xdd => "BracketRight".into(),
+        0xde => "Quote".into(),
+        _ => format!("VK_{:02X}", key),
     }
 }
 fn color_distance(a: u32, b: u32) -> u32 {
@@ -839,5 +926,80 @@ mod tests {
         );
         assert!(!e.armed());
         assert!(e.held_keys.is_empty());
+    }
+    #[test]
+    fn input_telemetry_records_successful_keys_without_text() {
+        let events = Arc::new(Mutex::new(vec![]));
+        let dir = std::env::temp_dir().join(format!("rustyhotkey-events-{}", now_ms()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut e = Engine::new(Fake::new(events), profile(), dir).unwrap();
+        e.arm().unwrap();
+        e.execute(&[
+            Action::Tap { key: 0x41 },
+            Action::Text {
+                text: "secret".into(),
+            },
+        ])
+        .unwrap();
+        let snapshot = e.input_events(0);
+        let list = snapshot["events"].as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0]["key"], "KeyA");
+        assert!(snapshot.to_string().find("secret").is_none());
+    }
+    #[test]
+    fn input_cursor_reports_overflow_and_held_mouse() {
+        let events = Arc::new(Mutex::new(vec![]));
+        let dir = std::env::temp_dir().join(format!("rustyhotkey-ring-{}", now_ms()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut e = Engine::new(Fake::new(events), profile(), dir).unwrap();
+        e.arm().unwrap();
+        e.execute(&[Action::Button {
+            button: 1,
+            down: true,
+        }])
+        .unwrap();
+        for _ in 0..260 {
+            e.execute(&[Action::Tap { key: 0x41 }]).unwrap();
+        }
+        let snapshot = e.input_events(0);
+        assert!(snapshot["truncated"].as_bool().unwrap());
+        assert!(snapshot["oldest_sequence"].as_u64().unwrap() > 1);
+        assert!(
+            snapshot["held"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "Mouse1")
+        );
+    }
+    #[test]
+    fn pause_releases_owned_keyboard_and_mouse_inputs() {
+        let events = Arc::new(Mutex::new(vec![]));
+        let dir = std::env::temp_dir().join(format!("rustyhotkey-release-{}", now_ms()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut e = Engine::new(Fake::new(events.clone()), profile(), dir).unwrap();
+        e.arm().unwrap();
+        e.execute(&[
+            Action::Key {
+                key: 0x41,
+                down: true,
+            },
+            Action::Button {
+                button: 1,
+                down: true,
+            },
+        ])
+        .unwrap();
+        e.pause().unwrap();
+        let snapshot = e.input_events(0);
+        assert!(snapshot["held"].as_array().unwrap().is_empty());
+        assert!(
+            snapshot["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["kind"] == "up")
+        );
     }
 }

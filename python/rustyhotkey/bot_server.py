@@ -150,6 +150,8 @@ class Provider:
 
 class BotService:
     def __init__(self, store: CacheStore, vault: Any, provider_call: Any | None = None, registry: ToolRegistry | None = None):
+        from .input_monitor import InputMonitor
+        self.input_monitor = InputMonitor()
         self.store, self.vault, self.provider_call, self.registry = store, vault, provider_call, registry
         self.tasks: dict[str, dict[str, Any]] = {}; self.lock = threading.Lock(); self.pool = ThreadPoolExecutor(max_workers=4)
 
@@ -251,9 +253,16 @@ def make_handler(service: BotService, token: str):
         def do_GET(self):
             if self.path == "/" or self.path.startswith("/index.html"):
                 raw = _asset("index.html"); self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
-            if self.path in {"/app.js", "/style.css", "/portraits.png"}:
+            if self.path in {"/app.js", "/style.css", "/portraits.png", "/keyboard.js", "/keyboard.css"}:
                 raw = _asset(self.path[1:]); self.send_response(200); self.send_header("Content-Type", "application/javascript" if self.path.endswith("js") else "text/css" if self.path.endswith("css") else "image/png"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
             if not self._auth(): return
+            if urlsplit(self.path).path == "/api/input-events":
+                from urllib.parse import parse_qs
+                try:
+                    after = int(parse_qs(urlsplit(self.path).query).get('after', ['0'])[0])
+                    self._json(service.input_monitor.snapshot(after))
+                except ValueError as e: self._json({'error': str(e)}, 400)
+                return
             if self.path == "/api/health": self._json({"ok": True, "product": "RHK BOT"}); return
             if self.path == "/api/state": self._json(service.state()); return
             if self.path == "/api/templates": self._json({"templates": service.templates()}); return
@@ -267,12 +276,17 @@ def make_handler(service: BotService, token: str):
                 data = json.loads(self.rfile.read(length))
             except ValueError: self.send_error(400); return
             try:
-                if self.path == "/api/providers": out = service.provider(data)
+                if self.path == "/api/input-events":
+                    if not isinstance(data, dict) or set(data) != {'source', 'events'}:
+                        raise ValueError('source and events are required')
+                    # This endpoint only records telemetry; it never controls input.
+                    out = service.input_monitor.publish('sim:' + data['source'] if isinstance(data['source'], str) else data['source'], data['events'])
+                elif self.path == "/api/providers": out = service.provider(data)
                 elif self.path == "/api/bots": out = service.bot(data); out = {"bot": out, **out}
                 elif self.path == "/api/chat": out = {"task_id": service.chat(data.get("bot_id", ""), data.get("message", ""))}
                 else: self.send_error(404); return
                 self._json(out, 201)
-            except BotError as e: self._json({"error": str(e)}, 400)
+            except (BotError, ValueError) as e: self._json({"error": str(e)}, 400)
         def do_DELETE(self):
             if not self._auth(): return
             if self.path.startswith("/api/bots/"):
@@ -315,6 +329,7 @@ def serve(data_dir: Path, port: int = 0, no_open: bool = False, service_factory:
     try: server.serve_forever()
     except KeyboardInterrupt: return 0
     finally:
+        service.input_monitor.close()
         try:
             current = json.loads(registry_file.read_text(encoding="utf-8"))
             if current.get("pid") == os.getpid() and current.get("port") == server.server_port and current.get("token") == token: registry_file.unlink()
