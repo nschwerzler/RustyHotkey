@@ -55,6 +55,28 @@ class ClientTests(unittest.TestCase):
       for t in threads: t.join()
       self.assertEqual(len(out), 8)
 
+  def test_concurrent_first_requests_start_one_process(self):
+    from unittest.mock import patch
+    import time
+    with tempfile.TemporaryDirectory() as d:
+      c = client(Path(d), heartbeat_interval=None)
+      barrier = threading.Barrier(8); out = []; errors = []; starts = []
+      popen = subprocess.Popen
+      def slow_start(*args, **kwargs):
+        starts.append(1); time.sleep(.03); return popen(*args, **kwargs)
+      def request():
+        barrier.wait()
+        try: out.append(c.status())
+        except Exception as error: errors.append(error)
+      try:
+        with patch('rustyhotkey.client.subprocess.Popen', side_effect=slow_start):
+          threads = [threading.Thread(target=request) for _ in range(8)]
+          for t in threads: t.start()
+          for t in threads: t.join(timeout=5)
+        self.assertEqual(errors, []); self.assertEqual(len(out), 8)
+        self.assertEqual(len(starts), 1)
+      finally: c.close()
+
 
   def test_timeout_does_not_poison_next_request(self):
     with tempfile.TemporaryDirectory() as d, client(Path(d), timeout=.03) as c:

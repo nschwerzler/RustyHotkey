@@ -123,6 +123,7 @@ class Client:
         self._responses: dict[str, queue.Queue[dict[str, Any]]] = {}
         self._lock = threading.Lock()
         self._write_lock = threading.Lock()
+        self._start_lock = threading.Lock()
         self._closed = False
         self._counter = 0
         self._reader: threading.Thread | None = None
@@ -142,6 +143,11 @@ class Client:
         self.close()
 
     def start(self) -> None:
+        with self._start_lock:
+            if self._closed: raise RustyHotkeyError("client is closed")
+            self._start_process()
+
+    def _start_process(self) -> None:
         if self._process is not None:
             return
         self._process = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
