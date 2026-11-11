@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>RHK BOT</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail" aria-label="Bot navigation">
+      <div class="brand"><span class="brand-mark">R</span><span>RHK BOT</span></div>
+      <div class="rail-heading"><span>BOTS</span><button id="add-bot" class="icon-button" type="button" aria-label="Add bot">+</button></div>
+      <nav id="bot-list" class="bot-list" aria-label="Bots"></nav>
+      <div class="rail-spacer"></div>
+      <button id="settings-button" class="settings-link" type="button"><span aria-hidden="true">⚙</span> Settings</button>
+      <div id="connection-status" class="connection-status"><span class="status-dot"></span><span>Connecting…</span></div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div><p class="eyebrow">WORKSPACE / <span id="active-bot-label">MASTER</span></p><h1 id="active-bot-name">Master</h1></div>
+        <div class="top-actions"><span id="run-status" class="run-status idle"><span class="status-dot"></span>Idle</span><button id="context-toggle" class="ghost-button" type="button" aria-expanded="true">Context</button></div>
+      </header>
+      <section id="notice" class="notice" role="status" hidden></section>
+      <section id="transcript" class="transcript" aria-live="polite" aria-label="Chat transcript"></section>
+      <form id="composer" class="composer">
+        <label class="sr-only" for="message">Message</label>
+        <textarea id="message" rows="3" placeholder="Ask Master to create or explain a script…" autocomplete="off"></textarea>
+        <div class="composer-footer"><span class="composer-hint">Enter to send · Shift+Enter for a new line</span><button id="send-button" class="primary-button" type="submit">Send <span aria-hidden="true">↗</span></button></div>
+      </form>
+    </main>
+
+    <aside id="context-panel" class="context-panel" aria-label="Context and tasks">
+      <div class="panel-heading"><h2>Context</h2><button id="close-context" class="icon-button" type="button" aria-label="Hide context">×</button></div>
+      <div class="context-card"><span class="card-label">ACTIVE BOT</span><strong id="context-bot-name">Master</strong><span id="context-bot-role">RHK scripting expert</span></div>
+      <div class="panel-section"><div class="section-title"><h3>Tasks</h3><span id="task-count" class="count">0</span></div><div id="task-list" class="task-list"><p class="empty-state">No active tasks</p></div></div>
+      <div class="panel-section"><div class="section-title"><h3>Handoffs</h3></div><p id="handoff-empty" class="empty-state">Bots can hand off messages through the workspace.</p><div id="handoff-list"></div></div>
+    </aside>
+  </div>
+
+  <dialog id="settings-dialog" class="settings-dialog">
+    <form method="dialog" id="settings-form">
+      <div class="dialog-heading"><div><p class="eyebrow">WORKSPACE</p><h2>Settings</h2></div><button class="icon-button" value="cancel" formnovalidate aria-label="Close settings">×</button></div>
+      <div id="settings-error" class="form-error" role="alert" hidden></div>
+      <section class="settings-section"><h3>Providers</h3><p class="muted">Keys are write-only. Configured values are never returned to this page.</p><div id="provider-list" class="provider-list"></div><button id="add-provider" class="secondary-button" type="button">+ Add provider</button></section>
+      <section id="bot-settings" class="settings-section"><h3>Bot profile</h3><div class="form-grid"><label>Name<input id="bot-name" required></label><label>Role<input id="bot-role" required></label><label>Provider<select id="bot-provider"></select></label><label>Model<input id="bot-model" required></label></div><fieldset><legend>Portrait</legend><div id="portrait-gallery" class="portrait-gallery"></div></fieldset><fieldset><legend>Accent ring</legend><div id="accent-gallery" class="accent-gallery"></div></fieldset><label class="checkbox-label"><input id="bot-allow-mutating" type="checkbox"> Allow action tools</label><div class="settings-actions"><button id="save-bot" class="primary-button" type="button">Save bot</button><button id="delete-bot" class="danger-button" type="button">Delete bot</button></div></section>
+    </form>
+  </dialog>
+  <script src="app.js"></script>
+</body>
+</html>

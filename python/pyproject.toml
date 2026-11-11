@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rustyhotkey"
+version = "0.1.0"
+description = "Python client for the RustyHotkey game automation framework"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+rhk = ["ui_assets/*.html", "ui_assets/*.js", "ui_assets/*.css", "ui_assets/*.png"]

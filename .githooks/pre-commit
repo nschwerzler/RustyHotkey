@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; assert sys.version_info >= (3, 10)' >/dev/null 2>&1; then
+    exec python3 -B tools/check_public.py --staged
+elif command -v python >/dev/null 2>&1 && python -c 'import sys; assert sys.version_info >= (3, 10)' >/dev/null 2>&1; then
+    exec python -B tools/check_public.py --staged
+elif command -v py >/dev/null 2>&1 && py -3 -c 'import sys; assert sys.version_info >= (3, 10)' >/dev/null 2>&1; then
+    exec py -3 -B tools/check_public.py --staged
+fi
+echo 'public guard: Python 3 is required' >&2
+exit 1

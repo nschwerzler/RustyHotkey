@@ -1,0 +1,32 @@
+[package]
+name = "rustyhotkey"
+version = "0.1.0"
+edition = "2024"
+description = "A configurable game automation framework"
+license-file = "LICENSE.md"
+
+[[bin]]
+name = "rhk"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+turso = { version = "0.9.0-pre.5", default-features = false }
+tokio = { version = "1.48.0", features = ["rt-multi-thread"] }
+mlua = { version = "0.12.2", features = ["lua54", "vendored", "serialize"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+  "Foundation", "Graphics_Imaging", "Media_Ocr", "Storage_Streams",
+  "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com",
+  "Win32_System_DataExchange", "Win32_System_Memory",
+  "Win32_System_LibraryLoader", "Win32_UI_HiDpi",
+  "Win32_Networking_WinHttp",
+  "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"
+] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

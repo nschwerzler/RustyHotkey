@@ -1,0 +1,13 @@
+/target/
+*.log
+.env
+.env.*
+profiles/
+recordings/
+runtime/
+.vs/
+.idea/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
