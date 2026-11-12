@@ -106,7 +106,7 @@ class Client:
 
     ``command`` can be supplied for tests or for a separately installed binary;
     it is always executed without a shell. The default command is the binary
-    named ``rustyhotkey`` on PATH.
+    named ``rhk`` on PATH.
     """
 
     def __init__(self, profile: str | Path | Profile, *, command: Sequence[str] | None = None,
@@ -117,6 +117,8 @@ class Client:
         self.profile = str(profile.path if isinstance(profile, Profile) else profile)
         executable = os.environ.get("RHK_BINARY", "rhk") if command is None else None
         self.command = list(command or (executable,)) + [mode, self.profile]
+        if script_path is None and mode == 'rpc':
+            script_path = os.environ.get('RHK_SCRIPT_PATH') or None
         if script_path is not None:
             self.command += ["--script", str(script_path)]
         if no_tray:

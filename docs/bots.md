@@ -48,6 +48,10 @@ a file-backed draft workspace under the app data directory. Updates require
 the current revision and saving never executes code. See [scripts.md](scripts.md)
 for the API, syntax checks and bounds.
 
+The operator can separately launch a saved Python revision, inspect its output
+and stop the direct interpreter. Launches are never triggered by Save or
+registered as bot tools. See [script-runner.md](script-runner.md).
+
 `POST /api/input-events` is a separate telemetry-only endpoint. All API routes
 require the runtime token and reject invalid Host or Origin values. Provider
 and bot objects returned by the API never contain keys or vault identifiers.

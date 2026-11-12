@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import time
 
 from .scripts import ScriptWorkspace
 
@@ -19,9 +20,24 @@ def main(argv: list[str] | None = None) -> int:
         if command == 'save':
             sub.add_argument('--file', type=Path, required=True, help='UTF-8 text file to save as a draft')
             sub.add_argument('--revision', help='current revision for updating an existing draft')
+    run = commands.add_parser('run', help='explicitly run a saved Python revision in the foreground')
+    run.add_argument('id'); run.add_argument('--revision',required=True)
     args = parser.parse_args(argv)
     try:
         workspace = ScriptWorkspace(args.root)
+        if args.command == 'run':
+            from .script_runner import ScriptRunner
+            with ScriptRunner(workspace) as runner:
+                receipt = runner.run(args.id,args.revision)
+                print(json.dumps(receipt,ensure_ascii=False),flush=True)
+                try:
+                    while receipt['state'] in {'running','stopping'}:
+                        time.sleep(.1); receipt = runner.status(receipt['id'])
+                except KeyboardInterrupt:
+                    receipt = runner.stop(receipt['id'])
+                    print(json.dumps(receipt,ensure_ascii=False)); return 130
+                print(json.dumps(receipt,ensure_ascii=False))
+                return 0 if receipt['exit_code'] == 0 else 1
         if args.command == 'list': result = {'scripts':workspace.list_scripts()}
         elif args.command == 'read': result = workspace.read_script(args.id,args.extension)
         else:

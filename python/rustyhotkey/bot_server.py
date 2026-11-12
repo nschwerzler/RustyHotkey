@@ -163,11 +163,15 @@ class BotService:
             self.registry.register('simulate_profile', 'Run a bounded mock scenario and show its input in Keyboard. Never emits OS input.', {'type':'object','properties':{'scenario':{'type':'object'}},'required':['scenario'],'additionalProperties':False}, lambda x: self.simulation_summary(x['scenario']))
         self.tasks: dict[str, dict[str, Any]] = {}; self.lock = threading.Lock(); self.pool = ThreadPoolExecutor(max_workers=4)
         self.workspace = None
+        self.script_runner = None
 
     def configure_workspace(self, root: Path) -> None:
         from .scripts import ScriptWorkspace
         if self.workspace is not None: raise BotError('script workspace is already configured')
         self.workspace = ScriptWorkspace(root)
+        from .script_runner import ScriptRunner
+        self.script_runner = ScriptRunner(self.workspace)
+        self.registry.add_cleanup(self.script_runner.close)
         self.registry.register('list_scripts', 'List saved Python, Lua and JSON drafts in this workspace.',
                                {'type':'object','properties':{},'additionalProperties':False}, lambda _: self.workspace.list_scripts())
         fields = {'id':{'type':'string'},'extension':{'type':'string','enum':['py','lua','json']}}
@@ -331,6 +335,9 @@ def make_handler(service: BotService, token: str):
             if self.path == "/api/health": self._json({"ok": True, "product": "RHK BOT"}); return
             if self.path == "/api/state": self._json(service.state()); return
             if self.path == "/api/templates": self._json({"templates": service.templates()}); return
+            if self.path == '/api/script-runs':
+                if service.script_runner is None: self._json({'error':'script workspace is unavailable'},400); return
+                self._json({'runs':service.script_runner.list_runs()}); return
             if self.path == '/api/scripts' or self.path.startswith('/api/scripts/'):
                 try:
                     if service.workspace is None: raise ValueError('script workspace is unavailable')
@@ -361,6 +368,17 @@ def make_handler(service: BotService, token: str):
                     out = service.run_simulation(data['scenario'])
                 elif self.path == "/api/providers": out = service.provider(data)
                 elif self.path == "/api/bots": out = service.bot(data); out = {"bot": out, **out}
+                elif self.path == '/api/script-runs':
+                    if service.script_runner is None: raise ValueError('script workspace is unavailable')
+                    if not isinstance(data,dict) or set(data) != {'id','expected_revision'}: raise ValueError('id and expected_revision are required')
+                    from .scripts import ScriptConflict
+                    try: out = service.script_runner.run(data['id'],data['expected_revision'])
+                    except ScriptConflict as error: self._json({'error':str(error)},409); return
+                elif self.path.startswith('/api/script-runs/') and self.path.endswith('/stop'):
+                    if service.script_runner is None: raise ValueError('script workspace is unavailable')
+                    if data != {}: raise ValueError('stop takes an empty object')
+                    run_id = self.path.removeprefix('/api/script-runs/').removesuffix('/stop')
+                    out = service.script_runner.stop(run_id)
                 elif self.path == '/api/scripts':
                     if service.workspace is None: raise ValueError('script workspace is unavailable')
                     if not isinstance(data,dict) or set(data) - {'id','extension','text','expected_revision'} or not {'id','extension','text'} <= set(data):

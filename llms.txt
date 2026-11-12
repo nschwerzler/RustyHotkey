@@ -24,6 +24,11 @@ The Scripts workspace stores Python, Lua and JSON drafts outside source. Use
 updates. Saving performs syntax checks where supported and never executes a
 draft. See [script workspace](docs/scripts.md).
 
+Saved Python revisions can be launched by a separate operator action in the
+app or with `rhk scripts run NAME --revision HASH`. The [script runner](docs/script-runner.md)
+captures that file revision, exposes bounded output and Stop, and never arms
+RHK. Launch endpoints are not registered as LLM tools.
+
 The default bot registry provides bounded HTTPS fetch and cache tools in its
 own `rhk.tools.<namespace>` space. Cache writes require action-tool permission;
 application settings and transcripts are outside that tool cache. See

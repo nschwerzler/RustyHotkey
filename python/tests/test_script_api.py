@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
@@ -24,13 +25,16 @@ class ScriptApiTests(unittest.TestCase):
             service = BotService(CacheStore(DB()), MemoryVault())
             service.configure_workspace(Path(directory))
             server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(service, 'test-token'))
+            server.daemon_threads = False
             thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
             def request(method, url, data=None, auth=True):
-                conn = HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+                conn = HTTPConnection('127.0.0.1', server.server_port, timeout=10)
                 headers = {'Content-Type': 'application/json'}
                 if auth: headers['X-RHK-Token'] = 'test-token'
-                conn.request(method, url, json.dumps(data) if data is not None else None, headers)
-                response = conn.getresponse(); raw = response.read(); status = response.status; conn.close()
+                try:
+                    conn.request(method, url, json.dumps(data) if data is not None else None, headers)
+                    response = conn.getresponse(); raw = response.read(); status = response.status
+                finally: conn.close()
                 return status, json.loads(raw) if raw.startswith(b'{') else None
             try:
                 self.assertEqual(request('GET', '/api/scripts', auth=False)[0], 403)
@@ -44,6 +48,19 @@ class ScriptApiTests(unittest.TestCase):
                 self.assertEqual(request('POST', '/api/scripts', {**draft, 'id': '../escape'})[0], 400)
                 with self.assertRaises(ToolError): service.registry.call('save_script', draft)
                 self.assertEqual(service.registry.call('read_script', {'id':'example','extension':'py'})['text'], 'value = 2\n')
+                current = request('GET','/api/scripts/example.py')[1]
+                run_request = {'id':'example','expected_revision':current['revision']}
+                self.assertEqual(request('POST','/api/script-runs',run_request,auth=False)[0],403)
+                status, run = request('POST','/api/script-runs',run_request)
+                self.assertEqual(status,201)
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    runs = request('GET','/api/script-runs')[1]['runs']
+                    result = next(x for x in runs if x['id']==run['id'])
+                    if result['state'] not in {'running','stopping'}: break
+                    time.sleep(.02)
+                self.assertEqual(result['exit_code'],0)
+                self.assertFalse(any('run_script' in item['function']['name'] for item in service.registry.schemas()))
             finally:
                 server.shutdown(); server.server_close(); service.close(); thread.join(timeout=2)
 

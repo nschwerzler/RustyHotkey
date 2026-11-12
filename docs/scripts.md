@@ -59,3 +59,6 @@ imports or executes the draft. JSON is parsed to check JSON syntax. Lua is saved
 as bounded UTF-8 text; native Lua validation happens through the runtime when
 the caller separately chooses to validate it. Every saved file remains a draft
 and this API provides no execution operation.
+
+To run a saved Python revision as a separate operator action, see
+[the script runner](script-runner.md). Saving a draft never launches it.

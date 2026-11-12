@@ -100,6 +100,16 @@ class ClientTests(unittest.TestCase):
       with c:
         self.assertEqual(c.hotkeys(False)["op"], "hotkeys")
 
+  def test_runner_marker_sets_tray_source_without_affecting_database(self):
+    from unittest.mock import patch
+    with patch.dict('os.environ', {'RHK_SCRIPT_PATH':'example.py'}):
+      c = Client('example.json')
+      self.assertEqual(c.command[-2:],['--script','example.py'])
+      explicit = Client('example.json',script_path='other.py')
+      self.assertEqual(explicit.command[-2:],['--script','other.py'])
+      db = Database('example.db')
+      self.assertNotIn('--script',db.command)
+
   def test_database_fetch_request_is_structured(self):
     with tempfile.TemporaryDirectory() as d:
       db = Database(Path(d) / "state.db", command=[sys.executable, str(Path(d) / "fake.py")])
