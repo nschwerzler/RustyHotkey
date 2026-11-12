@@ -28,10 +28,18 @@ Start with `rhk rpc PROFILE`. Each request needs `op`; include an `id` to correl
 | `clipboard` | none | `{text:string}` |
 | `screenshot` | optional `region`, `path` | `{width,height,path}` |
 | `ocr` | optional `region` | `{words:[{text,region}]}` |
+
 | `notify` | `message`, `ttl_ms` | `{shown:true}` |
 | `sound` | `cue` | `{played:true}` |
 | `hotkeys` | `enabled` | runtime state |
 | `workflow` | `workflow` | `{complete:true}` |
+
+Windows capture uses the target's client area. If the window returns an entirely
+black frame, it retries from the visible desktop while the target is foreground.
+That fallback can include overlapping windows and fails if the region extends
+outside the desktop, focus changes, or the desktop result is entirely black.
+An intentionally black region can therefore produce a capture error. OCR uses the
+same capture path.
 
 Runtime status includes `running` (loaded), `executing`, `armed`, `paused`,
 `abort_latched`, `held_keys`, `held_buttons`, `dormant`, `hotkeys_enabled`

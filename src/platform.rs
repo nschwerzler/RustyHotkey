@@ -277,9 +277,61 @@ mod windows_backend {
                 .and_then(|n| n.checked_mul(4))
                 .filter(|&n| n <= 256 * 1024 * 1024)
                 .ok_or("capture is too large")?;
+            let hwnd = self.hwnd.get();
+            let image = self.capture_dc(Some(hwnd), x, y, w, h, len)?;
+            if image
+                .bgra
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] != [0, 0, 0])
+            {
+                return Ok(image);
+            }
             unsafe {
-                let hwnd = self.hwnd.get();
-                let dc = GetDC(Some(hwnd));
+                if GetForegroundWindow() != hwnd {
+                    return Err("capture is black and target is not foreground".into());
+                }
+                let mut origin = POINT { x, y };
+                ClientToScreen(hwnd, &mut origin)
+                    .ok()
+                    .map_err(|e| format!("ClientToScreen: {e}"))?;
+                let (left, top, width, height) = (
+                    GetSystemMetrics(SM_XVIRTUALSCREEN),
+                    GetSystemMetrics(SM_YVIRTUALSCREEN),
+                    GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                    GetSystemMetrics(SM_CYVIRTUALSCREEN),
+                );
+                if origin.x < left
+                    || origin.y < top
+                    || i64::from(origin.x) + i64::from(w) > i64::from(left) + i64::from(width)
+                    || i64::from(origin.y) + i64::from(h) > i64::from(top) + i64::from(height)
+                {
+                    return Err("capture region extends outside the desktop".into());
+                }
+                let image = self.capture_dc(None, origin.x, origin.y, w, h, len)?;
+                if GetForegroundWindow() != hwnd {
+                    return Err("target lost focus during capture".into());
+                }
+                if image
+                    .bgra
+                    .chunks_exact(4)
+                    .all(|pixel| pixel[..3] == [0, 0, 0])
+                {
+                    return Err("capture is entirely black".into());
+                }
+                Ok(image)
+            }
+        }
+        fn capture_dc(
+            &self,
+            hwnd: Option<HWND>,
+            x: i32,
+            y: i32,
+            w: i32,
+            h: i32,
+            len: usize,
+        ) -> Result<model::Capture> {
+            unsafe {
+                let dc = GetDC(hwnd);
                 if dc.0.is_null() {
                     return Err("GetDC failed".into());
                 }
@@ -292,7 +344,7 @@ mod windows_backend {
                     if !mem.0.is_null() {
                         let _ = DeleteDC(mem);
                     }
-                    let _ = ReleaseDC(Some(hwnd), dc);
+                    let _ = ReleaseDC(hwnd, dc);
                     return Err("capture surface failed".into());
                 }
                 let old = SelectObject(mem, HGDIOBJ(bmp.0));
@@ -324,7 +376,7 @@ mod windows_backend {
                 };
                 let _ = DeleteObject(HGDIOBJ(bmp.0));
                 let _ = DeleteDC(mem);
-                let _ = ReleaseDC(Some(hwnd), dc);
+                let _ = ReleaseDC(hwnd, dc);
                 if !ok || got != h {
                     return Err("capture failed".into());
                 }
@@ -709,7 +761,17 @@ mod windows_backend {
                 let dc = GetDC(Some(HWND(first.0)));
                 assert!(!dc.0.is_null());
                 assert_ne!(SetPixel(dc.0, 2, 2, 0x00030201), u32::MAX);
+                assert_ne!(SetPixel(dc.0, 3, 3, 0), u32::MAX);
                 let _ = ReleaseDC(Some(HWND(first.0)), dc);
+            }
+            if unsafe { GetForegroundWindow() } != HWND(first.0) {
+                let black = model::Region {
+                    x: 3.0 / 64.0,
+                    y: 3.0 / 64.0,
+                    width: 1.0 / 64.0,
+                    height: 1.0 / 64.0,
+                };
+                assert!(backend.screenshot(Some(black)).is_err());
             }
             let image = backend.screenshot(None).unwrap();
             assert_eq!(

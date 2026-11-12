@@ -401,6 +401,15 @@ impl<B: Backend> Engine<B> {
         self.last_heartbeat = Some(self.clock_now());
     }
     fn poll_signal(&mut self) -> Result<()> {
+        let pid_resume = self.pid_signal("resume");
+        if pid_resume.exists() {
+            let _ = fs::remove_file(pid_resume);
+            // A tray resume is subject to the same focus and abort checks as
+            // an explicit arm. A failed request leaves the engine paused.
+            if self.backend.target_present()? {
+                let _ = self.arm();
+            }
+        }
         let pause_path = self.state_dir.join("pause.signal");
         if let Ok(marker) = fs::read(&pause_path) {
             if marker.len() <= 128 && marker != self.pause_marker {
@@ -1321,6 +1330,30 @@ mod tests {
                 .iter()
                 .any(|v| v["kind"] == "up")
         );
+    }
+    #[test]
+    fn tray_resume_obeys_focus_and_abort_latch() {
+        let events = Arc::new(Mutex::new(vec![]));
+        let dir = std::env::temp_dir().join(format!("rhk-resume-{}", now_ms()));
+        let mut engine = Engine::new(Fake::new(events), profile(), dir.clone()).unwrap();
+        fs::create_dir_all(engine.control_dir()).unwrap();
+        let resume = engine.pid_signal("resume");
+        fs::write(&resume, b"resume").unwrap();
+        engine.poll_signal().unwrap();
+        assert!(engine.armed());
+        engine.pause().unwrap();
+        engine.backend.focused = false;
+        fs::write(&resume, b"resume").unwrap();
+        engine.poll_signal().unwrap();
+        assert!(!engine.armed());
+        engine.backend.focused = true;
+        engine.abort().unwrap();
+        fs::write(&resume, b"resume").unwrap();
+        engine.poll_signal().unwrap();
+        assert!(!engine.armed());
+        assert_eq!(engine.status()["abort_latched"], true);
+        drop(engine);
+        let _ = fs::remove_dir_all(dir);
     }
     #[test]
     fn observe_only_refuses_arm_and_hotkey_disable_releases() {

@@ -9,6 +9,19 @@ pub struct ScriptTrayOptions {
     pub state_dir: PathBuf,
 }
 
+// The menu represents the operator's setting, even when target absence or
+// observe-only mode temporarily prevents hotkeys from being effective.
+fn requested_hotkeys(status: &serde_json::Value) -> bool {
+    status
+        .get("requested_hotkeys")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true)
+}
+
+fn restore_focus_for_choice(script: bool, paused: bool, choice: u32) -> bool {
+    script && paused && choice == 2
+}
+
 pub fn data_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("RHK_DATA_DIR") {
         return Ok(path.into());
@@ -128,6 +141,8 @@ mod native {
             rect: *const c_void,
         ) -> u32;
         fn SetForegroundWindow(w: Handle) -> i32;
+        fn GetForegroundWindow() -> Handle;
+        fn IsWindow(w: Handle) -> i32;
         fn GetCursorPos(p: *mut Point) -> i32;
         fn CreateIcon(
             instance: Handle,
@@ -276,9 +291,17 @@ mod native {
             }
             let mut p = Point::default();
             GetCursorPos(&mut p);
+            let previous_foreground = GetForegroundWindow();
             SetForegroundWindow(w);
             let choice = TrackPopupMenu(menu, 0x100 | 0x2, p.x, p.y, 0, w, null());
             DestroyMenu(menu);
+            if restore_focus_for_choice(script, paused, choice)
+                && !previous_foreground.is_null()
+                && previous_foreground != w
+                && IsWindow(previous_foreground) != 0
+            {
+                SetForegroundWindow(previous_foreground);
+            }
             choice
         }
     }
@@ -316,7 +339,7 @@ mod native {
                                 .unwrap_or(default)
                         };
                         s.paused = get("paused", false);
-                        s.hotkeys = get("hotkeys_enabled", true);
+                        s.hotkeys = status.as_ref().map(requested_hotkeys).unwrap_or(true);
                         let dormant = get("dormant", false);
                         let error = get("error", false);
                         let (color, label) = if error {
@@ -325,7 +348,7 @@ mod native {
                             (0x9098a3, "dormant")
                         } else if s.paused {
                             (0xf4aa39, "paused")
-                        } else if !s.hotkeys {
+                        } else if !get("hotkeys_enabled", true) {
                             (0x64a9f3, "hotkeys disabled")
                         } else if get("armed", true) {
                             (0x4cc78a, "running")
@@ -380,7 +403,18 @@ mod native {
                 let result = if let Some(o) = state.as_ref().and_then(|s| s.options.as_ref()) {
                     let dir = o.state_dir.join("control");
                     match choice {
-                        2 => signal(dir, &format!("{}.pause", o.engine_pid)),
+                        2 => signal(
+                            dir,
+                            &format!(
+                                "{}.{}",
+                                o.engine_pid,
+                                if state.as_ref().unwrap().paused {
+                                    "resume"
+                                } else {
+                                    "pause"
+                                }
+                            ),
+                        ),
                         5 => signal_value(
                             dir,
                             &format!("{}.hotkeys", o.engine_pid),
@@ -421,9 +455,9 @@ mod native {
                     tooltip(
                         &mut n,
                         if result.is_ok() {
-                            "RHK — pause requested"
+                            "RHK — state change requested"
                         } else {
-                            "RHK — pause request failed"
+                            "RHK — state change request failed"
                         },
                     );
                     Shell_NotifyIconW(1, &mut n);
@@ -588,3 +622,28 @@ mod native {
 }
 #[cfg(windows)]
 pub use native::{run, run_script};
+
+#[cfg(test)]
+mod tests {
+    use super::{requested_hotkeys, restore_focus_for_choice};
+    use serde_json::json;
+
+    #[test]
+    fn menu_uses_requested_hotkeys_when_temporarily_inactive() {
+        assert!(requested_hotkeys(&json!({
+            "requested_hotkeys": true, "hotkeys_enabled": false, "dormant": true
+        })));
+        assert!(!requested_hotkeys(&json!({
+            "requested_hotkeys": false, "hotkeys_enabled": false
+        })));
+    }
+
+    #[test]
+    fn only_explicit_script_resume_restores_focus() {
+        assert!(restore_focus_for_choice(true, true, 2));
+        assert!(!restore_focus_for_choice(true, false, 2));
+        assert!(!restore_focus_for_choice(true, true, 5));
+        assert!(!restore_focus_for_choice(false, true, 2));
+        assert!(!restore_focus_for_choice(true, true, 0));
+    }
+}

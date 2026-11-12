@@ -654,7 +654,7 @@ impl StatusFile {
         let dir = root.join("control");
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let pid = std::process::id();
-        for suffix in ["pause", "exit", "hotkeys", "status.json"] {
+        for suffix in ["pause", "resume", "exit", "hotkeys", "status.json"] {
             let _ = fs::remove_file(dir.join(format!("{pid}.{suffix}")));
         }
         Ok(Self {
@@ -678,7 +678,14 @@ impl StatusFile {
 impl Drop for StatusFile {
     fn drop(&mut self) {
         let pid = std::process::id();
-        for suffix in ["pause", "exit", "hotkeys", "status.json", "status.tmp"] {
+        for suffix in [
+            "pause",
+            "resume",
+            "exit",
+            "hotkeys",
+            "status.json",
+            "status.tmp",
+        ] {
             let _ = fs::remove_file(self.dir.join(format!("{pid}.{suffix}")));
         }
     }
