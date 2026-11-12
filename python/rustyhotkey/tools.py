@@ -23,13 +23,16 @@ def _validate(schema: dict[str, Any], value: Any, where: str = "input") -> None:
 
 
 class ToolRegistry:
-    def __init__(self): self._tools: dict[str, dict[str, Any]] = {}
+    def __init__(self):
+        self._tools: dict[str, dict[str, Any]] = {}
+        self._lifecycle: dict[str, Any] = {'closed':False, 'cleanup':[]}
     def register(self, name: str, description: str, input_schema: dict[str, Any], handler: Callable[[dict[str, Any]], Any], mutating: bool = False) -> None:
         if not name or name in self._tools or not callable(handler): raise ToolError("invalid or duplicate tool")
         self._tools[name] = {"name": name, "description": description, "input_schema": input_schema, "handler": handler, "mutating": bool(mutating)}
     def schemas(self, include_mutating: bool = True) -> list[dict[str, Any]]:
         return [{"type": "function", "function": {"name": x["name"], "description": x["description"], "parameters": x["input_schema"]}} for x in self._tools.values() if include_mutating or not x["mutating"]]
     def call(self, name: str, arguments: Any, allow_mutating: bool = False) -> Any:
+        if self._lifecycle['closed']: raise ToolError('tool registry is closed')
         tool = self._tools.get(name)
         if not tool: raise ToolError("unknown tool")
         if tool["mutating"] and not allow_mutating: raise ToolError("mutating tools are disabled")
@@ -40,7 +43,19 @@ class ToolRegistry:
         return tool["handler"](arguments)
     def has(self, name: str) -> bool: return name in self._tools
     def clone(self) -> "ToolRegistry":
-        other = ToolRegistry(); other._tools = dict(self._tools); return other
+        other = ToolRegistry(); other._tools = dict(self._tools); other._lifecycle = self._lifecycle; return other
+    def add_cleanup(self, callback: Callable[[], Any]) -> None:
+        if self._lifecycle['closed'] or not callable(callback): raise ToolError('invalid cleanup callback')
+        self._lifecycle['cleanup'].append(callback)
+    def close(self) -> list[str]:
+        if self._lifecycle['closed']: return []
+        self._lifecycle['closed'] = True
+        errors = []
+        for callback in reversed(self._lifecycle['cleanup']):
+            try: callback()
+            except Exception as error: errors.append(str(error)[:240])
+        self._lifecycle['cleanup'].clear()
+        return errors
 
 
 def default_registry(database: Any | None = None, fetch: Callable[[str], Any] | None = None) -> ToolRegistry:

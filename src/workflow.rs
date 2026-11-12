@@ -4,7 +4,6 @@ use crate::{
     runtime::{self, Engine},
 };
 use serde_json::json;
-use std::time::{Duration, Instant};
 
 const MAX_DEPTH: usize = 16;
 const MAX_ACTIONS: u64 = 100_000;
@@ -15,7 +14,14 @@ pub fn validate(workflow: &Workflow) -> Result<()> {
         return Err("unsupported workflow schema".into());
     }
     let mut total = 0u64;
-    validate_steps(&workflow.steps, 0, &mut total)
+    validate_steps(&workflow.steps, 0, &mut total)?;
+    if count_actions(&workflow.steps)? > MAX_ACTIONS {
+        return Err("expanded action count exceeds 100000".into());
+    }
+    if count_waits(&workflow.steps)? > MAX_WAIT_MS {
+        return Err("expanded workflow wait exceeds one hour".into());
+    }
+    Ok(())
 }
 
 fn validate_steps(steps: &[Step], depth: usize, total: &mut u64) -> Result<()> {
@@ -27,7 +33,9 @@ fn validate_steps(steps: &[Step], depth: usize, total: &mut u64) -> Result<()> {
             Step::Actions { actions } => {
                 for action in actions {
                     validate_action(action)?;
-                    *total = total.checked_add(1).ok_or("action count overflow")?;
+                    *total = total
+                        .checked_add(action_cost(action))
+                        .ok_or("action count overflow")?;
                 }
             }
             Step::WaitFor {
@@ -69,15 +77,55 @@ fn count_actions(steps: &[Step]) -> Result<u64> {
     for s in steps {
         n = n
             .checked_add(match s {
-                Step::Actions { actions } => actions.len() as u64,
+                Step::Actions { actions } => actions.iter().map(action_cost).sum(),
                 Step::Repeat { count, steps } => {
                     count_actions(steps)?.saturating_mul(*count as u64)
                 }
-                _ => 0,
+                _ => 1,
             })
             .ok_or("action count overflow")?;
     }
     Ok(n)
+}
+fn action_cost(action: &Action) -> u64 {
+    match action {
+        Action::ClickBurst {
+            count,
+            lock_position,
+            ..
+        } => u64::from(*count) * if *lock_position { 3 } else { 2 },
+        _ => 1,
+    }
+}
+fn count_waits(steps: &[Step]) -> Result<u64> {
+    let mut total = 0u64;
+    for step in steps {
+        let wait = match step {
+            Step::Actions { actions } => {
+                let mut duration = 0u64;
+                for action in actions {
+                    let value = match action {
+                        Action::Wait { ms } => *ms,
+                        Action::ClickBurst {
+                            count, interval_ms, ..
+                        } => u64::from(*count)
+                            .checked_mul(*interval_ms)
+                            .ok_or("wait budget overflow")?,
+                        _ => 0,
+                    };
+                    duration = duration.checked_add(value).ok_or("wait budget overflow")?;
+                }
+                duration
+            }
+            Step::WaitFor { timeout_ms, .. } => *timeout_ms,
+            Step::Repeat { count, steps } => count_waits(steps)?
+                .checked_mul(u64::from(*count))
+                .ok_or("wait budget overflow")?,
+            _ => 0,
+        };
+        total = total.checked_add(wait).ok_or("wait budget overflow")?;
+    }
+    Ok(total)
 }
 
 fn validate_action(action: &Action) -> Result<()> {
@@ -154,16 +202,18 @@ fn run_steps<B: Backend>(engine: &mut Engine<B>, steps: &[Step]) -> Result<()> {
                 timeout_ms,
                 poll_ms,
             } => {
-                let start = Instant::now();
+                let start = engine.elapsed_ms();
                 loop {
                     engine.heartbeat();
                     if engine.matches(condition)? {
                         break;
                     }
-                    if start.elapsed() >= Duration::from_millis(*timeout_ms) {
+                    if engine.elapsed_ms().saturating_sub(start) >= *timeout_ms {
                         return Err("wait_for timed out".into());
                     }
-                    std::thread::sleep(Duration::from_millis((*poll_ms).min(50)));
+                    engine.wait_ms((*poll_ms).min(50).min(
+                        timeout_ms.saturating_sub(engine.elapsed_ms().saturating_sub(start)),
+                    ))?;
                 }
             }
         }
@@ -212,5 +262,41 @@ mod tests {
             }],
         };
         assert_eq!(dry_run(&w).unwrap()["effects"], "none");
+    }
+    #[test]
+    fn burst_work_and_total_wait_are_bounded() {
+        let burst = Action::ClickBurst {
+            button: 1,
+            count: 1000,
+            interval_ms: 5000,
+            lock_position: true,
+        };
+        assert!(
+            validate(&Workflow {
+                schema_version: 1,
+                steps: vec![Step::Actions {
+                    actions: vec![burst]
+                }]
+            })
+            .is_err()
+        );
+        let burst = Action::ClickBurst {
+            button: 1,
+            count: 1000,
+            interval_ms: 1,
+            lock_position: true,
+        };
+        assert!(
+            validate(&Workflow {
+                schema_version: 1,
+                steps: vec![Step::Repeat {
+                    count: 100,
+                    steps: vec![Step::Actions {
+                        actions: vec![burst]
+                    }]
+                }]
+            })
+            .is_err()
+        );
     }
 }

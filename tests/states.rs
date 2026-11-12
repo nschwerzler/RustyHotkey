@@ -101,7 +101,7 @@ fn dormant_is_loaded_with_effective_hotkeys_disabled() {
     assert_eq!(engine.status()["hotkeys_enabled"], false);
     assert_eq!(engine.status()["requested_hotkeys"], true);
     engine.tick().unwrap();
-    engine.set_hotkeys_enabled(false);
+    engine.set_hotkeys_enabled(false).unwrap();
     engine.backend.present = true;
     engine.backend.focused = true;
     engine.tick().unwrap();
@@ -122,6 +122,7 @@ fn disabled_keyboard_rules_do_not_stop_timer_rules() {
             },
             actions: vec![Action::Tap { key: 66 }],
             cooldown_ms: 0,
+            delay_ms: 0,
             enabled: true,
         },
         Rule {
@@ -129,12 +130,13 @@ fn disabled_keyboard_rules_do_not_stop_timer_rules() {
             condition: Condition::Always,
             actions: vec![Action::Tap { key: 70 }],
             cooldown_ms: 0,
+            delay_ms: 0,
             enabled: true,
         },
     ];
     let mut engine = Engine::new(Fake::default(), p, path.clone()).unwrap();
     engine.arm().unwrap();
-    engine.set_hotkeys_enabled(false);
+    engine.set_hotkeys_enabled(false).unwrap();
     engine.tick().unwrap();
     assert!(engine.armed());
     assert!(
@@ -210,10 +212,10 @@ fn script_hotkeys_toggle_is_consumed_and_emergency_stays_available() {
     assert!(!marker.exists());
     assert!(engine.armed());
     assert_eq!(engine.status()["hotkeys_enabled"], false);
-    engine.set_hotkeys_enabled(true);
+    engine.set_hotkeys_enabled(true).unwrap();
     engine.poll_controls().unwrap();
     assert_eq!(engine.status()["hotkeys_enabled"], true);
-    engine.set_hotkeys_enabled(false);
+    engine.set_hotkeys_enabled(false).unwrap();
     engine.backend.keys.insert(201);
     engine.poll_controls().unwrap();
     assert!(engine.latched());

@@ -8,7 +8,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -66,7 +65,7 @@ pub fn validate_profile(profile: &Profile) -> Result<()> {
         }
         validate_condition(&rule.condition, 0)?;
         validate_actions(&rule.actions, 0)?;
-        if rule.cooldown_ms > MAX_WAIT_MS {
+        if rule.cooldown_ms > MAX_WAIT_MS || rule.delay_ms > MAX_WAIT_MS {
             return Err("rule cooldown is too large".into());
         }
     }
@@ -103,6 +102,21 @@ pub fn validate_condition(c: &Condition, depth: usize) -> Result<()> {
         return Err("condition nesting is too deep".into());
     }
     match c {
+        Condition::Modifiers {
+            shift,
+            control,
+            alt,
+            meta,
+        } => {
+            if shift.is_none() && control.is_none() && alt.is_none() && meta.is_none() {
+                return Err("modifier condition requires at least one state".into());
+            }
+            Ok(())
+        }
+        Condition::PixelPattern { point, pattern } => {
+            validate_point(*point)?;
+            pixel_pattern(pattern).map(|_| ())
+        }
         Condition::Always | Condition::Focused | Condition::KeyDown { key: _ } => {
             if let Condition::KeyDown { key } = c {
                 valid_key(*key)
@@ -152,12 +166,34 @@ pub fn validate_actions(actions: &[Action], depth: usize) -> Result<()> {
                 valid_coord(*y)?;
             }
             Action::Click { button } | Action::Button { button, .. } => valid_button(*button)?,
+            Action::ClickBurst {
+                button,
+                count,
+                interval_ms,
+                ..
+            } => {
+                valid_button(*button)?;
+                if !(1..=1000).contains(count)
+                    || *interval_ms == 0
+                    || *interval_ms > MAX_WAIT_MS / u64::from(*count)
+                {
+                    return Err("click burst count or duration is out of bounds".into());
+                }
+            }
             Action::Wait { ms } => {
                 if *ms > MAX_WAIT_MS {
                     return Err("wait is too large".into());
                 }
             }
-            Action::Pause | Action::SetHotkeys { .. } => {}
+            Action::Scroll { delta, .. } => {
+                if *delta == 0 || delta.unsigned_abs() > 120_000 {
+                    return Err("scroll delta is out of bounds".into());
+                }
+            }
+            Action::Pause
+            | Action::SetHotkeys { .. }
+            | Action::ToggleHotkeys
+            | Action::Sound { .. } => {}
             Action::Notify { message, ttl_ms } => {
                 if message.len() > 1_000_000 || *ttl_ms > MAX_WAIT_MS {
                     return Err("notification is outside supported limits".into());
@@ -218,6 +254,9 @@ pub struct Engine<B: Backend> {
     input_events: VecDeque<Value>,
     input_sequence: u64,
     last_tick: Option<Instant>,
+    clock_origin: Instant,
+    observe_only: bool,
+    pending_rules: HashMap<usize, Instant>,
 }
 
 impl<B: Backend> Engine<B> {
@@ -254,10 +293,51 @@ impl<B: Backend> Engine<B> {
             input_events: VecDeque::with_capacity(512),
             input_sequence: 0,
             last_tick: None,
+            clock_origin: Instant::now(),
+            observe_only: false,
+            pending_rules: HashMap::new(),
         })
     }
     pub fn control_handle(&self) -> ControlHandle {
         self.control.clone()
+    }
+    pub fn set_observe_only(&mut self, enabled: bool) -> Result<()> {
+        self.observe_only = enabled;
+        if enabled {
+            self.pause()?;
+        }
+        Ok(())
+    }
+    fn clock_now(&self) -> Instant {
+        self.backend
+            .virtual_time_ms()
+            .and_then(|ms| self.clock_origin.checked_add(Duration::from_millis(ms)))
+            .unwrap_or_else(Instant::now)
+    }
+    pub fn elapsed_ms(&self) -> u64 {
+        self.clock_now()
+            .saturating_duration_since(self.clock_origin)
+            .as_millis()
+            .min(u64::MAX as u128) as u64
+    }
+    pub fn wait_ms(&mut self, ms: u64) -> Result<()> {
+        if ms > MAX_WAIT_MS {
+            return Err("wait duration is out of bounds".into());
+        }
+        let end = self
+            .clock_now()
+            .checked_add(Duration::from_millis(ms))
+            .ok_or("wait clock overflow")?;
+        while self.clock_now() < end {
+            self.before_input()?;
+            let remaining = end
+                .saturating_duration_since(self.clock_now())
+                .as_millis()
+                .min(10) as u64;
+            self.backend.sleep_ms(remaining.max(1))?;
+        }
+        // A boundary observation may have changed focus or requested an abort.
+        self.before_input()
     }
     fn latch_path(&self) -> PathBuf {
         self.state_dir.join("abort.latch")
@@ -268,8 +348,12 @@ impl<B: Backend> Engine<B> {
     pub fn armed(&self) -> bool {
         self.armed
     }
-    pub fn set_hotkeys_enabled(&mut self, enabled: bool) {
+    pub fn set_hotkeys_enabled(&mut self, enabled: bool) -> Result<()> {
         self.hotkeys_enabled = enabled;
+        if !enabled {
+            self.release_all()?;
+        }
+        Ok(())
     }
     fn control_dir(&self) -> PathBuf {
         self.state_dir.join("control")
@@ -288,7 +372,7 @@ impl<B: Backend> Engine<B> {
     pub fn heartbeat(&mut self) {
         self.control.heartbeat();
         self.observed_heartbeat = self.control.heartbeat_ms.load(Ordering::Acquire);
-        self.last_heartbeat = Some(Instant::now());
+        self.last_heartbeat = Some(self.clock_now());
     }
     fn poll_signal(&mut self) -> Result<()> {
         let pause_path = self.state_dir.join("pause.signal");
@@ -308,7 +392,7 @@ impl<B: Backend> Engine<B> {
             if data.len() <= 256 {
                 if let Ok(v) = serde_json::from_slice::<Value>(&data) {
                     if let Some(enabled) = v.get("enabled").and_then(Value::as_bool) {
-                        self.hotkeys_enabled = enabled;
+                        self.set_hotkeys_enabled(enabled)?;
                     }
                 }
             }
@@ -323,8 +407,9 @@ impl<B: Backend> Engine<B> {
         let beat = self.control.heartbeat_ms.load(Ordering::Acquire);
         if beat != 0 && beat != self.observed_heartbeat {
             self.observed_heartbeat = beat;
-            self.last_heartbeat =
-                Instant::now().checked_sub(Duration::from_millis(now_ms().saturating_sub(beat)));
+            self.last_heartbeat = self
+                .clock_now()
+                .checked_sub(Duration::from_millis(now_ms().saturating_sub(beat)));
         }
         Ok(())
     }
@@ -337,12 +422,16 @@ impl<B: Backend> Engine<B> {
         if !self.backend.focused()? {
             self.armed = false;
             self.paused = true;
+            self.pending_rules.clear();
             let _ = self.release_all();
             return Err("target is not focused".into());
         }
         Ok(())
     }
     pub fn arm(&mut self) -> Result<()> {
+        if self.observe_only {
+            return Err("session is observe-only".into());
+        }
         self.safety_check()?;
         self.armed = true;
         self.paused = false;
@@ -427,15 +516,19 @@ impl<B: Backend> Engine<B> {
         json!({"events": events, "last_sequence": self.input_sequence, "oldest_sequence": oldest, "truncated": after.saturating_add(1) < oldest || after > self.input_sequence, "held": held, "limit": 512})
     }
     pub fn abort(&mut self) -> Result<()> {
+        self.pending_rules.clear();
         self.abort_latched = true;
         self.armed = false;
         self.paused = true;
+        self.pending_rules.clear();
         let write = fs::write(self.latch_path(), b"abort").map_err(|e| e.to_string());
         let release = self.release_all();
         write.and(release)
     }
     pub fn pause(&mut self) -> Result<()> {
+        self.pending_rules.clear();
         self.paused = true;
+        self.pending_rules.clear();
         self.armed = false;
         self.release_all()
     }
@@ -453,6 +546,7 @@ impl<B: Backend> Engine<B> {
         if self.dormant {
             self.armed = false;
             self.paused = true;
+            self.pending_rules.clear();
             self.release_all()?;
         }
         let in_target = !self.dormant && self.backend.focused()?;
@@ -479,12 +573,16 @@ impl<B: Backend> Engine<B> {
         Ok(())
     }
     fn check_input(&mut self) -> Result<()> {
+        if self.observe_only {
+            return Err("session is observe-only".into());
+        }
         if self.abort_latched || !self.armed || self.paused {
             return Err("engine is not ready".into());
         }
         if !self.backend.target_present()? {
             self.armed = false;
             self.paused = true;
+            self.pending_rules.clear();
             self.dormant = true;
             let _ = self.release_all();
             return Err("target absent".into());
@@ -493,6 +591,7 @@ impl<B: Backend> Engine<B> {
         if !self.backend.focused()? {
             self.armed = false;
             self.paused = true;
+            self.pending_rules.clear();
             let _ = self.release_all();
             return Err("target lost focus".into());
         }
@@ -501,8 +600,11 @@ impl<B: Backend> Engine<B> {
     fn before_input(&mut self) -> Result<()> {
         self.poll_controls()?;
         if let Some(max) = self.watchdog {
-            if self.last_heartbeat.map_or(true, |t| t.elapsed() > max) {
+            if self.last_heartbeat.map_or(true, |t| {
+                self.clock_now().saturating_duration_since(t) > max
+            }) {
                 self.paused = true;
+                self.pending_rules.clear();
                 self.armed = false;
                 let _ = self.release_all();
                 return Err("heartbeat watchdog expired".into());
@@ -538,6 +640,7 @@ impl<B: Backend> Engine<B> {
         if result.is_err() {
             self.armed = false;
             self.paused = true;
+            self.pending_rules.clear();
             let _ = self.release_all();
         }
         result
@@ -584,6 +687,31 @@ impl<B: Backend> Engine<B> {
                     })?;
                     self.held_buttons.remove(button);
                 }
+                Action::ClickBurst {
+                    button,
+                    count,
+                    interval_ms,
+                    lock_position,
+                } => {
+                    let point = if *lock_position {
+                        Some(self.backend.cursor()?)
+                    } else {
+                        None
+                    };
+                    if let Some(point) = point {
+                        validate_point(point)?;
+                    }
+                    for _ in 0..*count {
+                        self.wait_ms(*interval_ms)?;
+                        if let Some(point) = point {
+                            self.execute_inner(&[Action::Move {
+                                x: point.x,
+                                y: point.y,
+                            }])?;
+                        }
+                        self.execute_inner(&[Action::Click { button: *button }])?;
+                    }
+                }
                 Action::Button { button, down } => {
                     self.emit_input(&InputEvent::Button {
                         button: *button,
@@ -598,18 +726,17 @@ impl<B: Backend> Engine<B> {
                 Action::Text { text } => self
                     .backend
                     .emit(&InputEvent::Text { text: text.clone() })?,
+                Action::Scroll { delta, horizontal } => self.emit_input(&InputEvent::Wheel {
+                    delta: *delta,
+                    horizontal: *horizontal,
+                })?,
                 Action::Pause => self.pause()?,
-                Action::SetHotkeys { enabled } => self.set_hotkeys_enabled(*enabled),
+                Action::SetHotkeys { enabled } => self.set_hotkeys_enabled(*enabled)?,
+                Action::ToggleHotkeys => self.set_hotkeys_enabled(!self.hotkeys_enabled)?,
+                Action::Sound { cue } => self.backend.sound(*cue)?,
                 Action::Notify { message, ttl_ms } => self.backend.notify(message, *ttl_ms)?,
                 Action::Wait { ms } => {
-                    let end = Instant::now() + Duration::from_millis(*ms);
-                    while Instant::now() < end {
-                        self.before_input()?;
-                        thread::sleep(
-                            (end.saturating_duration_since(Instant::now()))
-                                .min(Duration::from_millis(10)),
-                        );
-                    }
+                    self.wait_ms(*ms)?;
                 }
             }
         }
@@ -619,7 +746,29 @@ impl<B: Backend> Engine<B> {
         validate_condition(condition, 0)?;
         Ok(match condition {
             Condition::Always => true,
+            Condition::PixelPattern { point, pattern } => {
+                let (color, mask) = pixel_pattern(pattern)?;
+                self.backend.pixel(*point)? & mask == color
+            }
             Condition::Focused => self.backend.focused()?,
+            Condition::Modifiers {
+                shift,
+                control,
+                alt,
+                meta,
+            } => {
+                let mut matched = true;
+                for (desired, key) in [(shift, 16), (control, 17), (alt, 18)] {
+                    if let Some(desired) = desired {
+                        matched &= self.backend.key_down(key)? == *desired;
+                    }
+                }
+                if let Some(desired) = meta {
+                    matched &=
+                        (self.backend.key_down(91)? || self.backend.key_down(92)?) == *desired;
+                }
+                matched
+            }
             Condition::KeyDown { key } => self.backend.key_down(*key)?,
             Condition::Pixel {
                 point,
@@ -654,6 +803,7 @@ impl<B: Backend> Engine<B> {
         if result.is_err() {
             self.armed = false;
             self.paused = true;
+            self.pending_rules.clear();
             let _ = self.release_all();
         }
         result
@@ -663,6 +813,7 @@ impl<B: Backend> Engine<B> {
         if !self.backend.target_present()? {
             self.armed = false;
             self.paused = true;
+            self.pending_rules.clear();
             self.dormant = true;
             let _ = self.release_all();
             return Ok(());
@@ -672,43 +823,84 @@ impl<B: Backend> Engine<B> {
             return Ok(());
         }
         if let Some(max) = self.watchdog {
-            if self.last_heartbeat.map_or(true, |t| t.elapsed() > max) {
+            if self.last_heartbeat.map_or(true, |t| {
+                self.clock_now().saturating_duration_since(t) > max
+            }) {
                 self.pause()?;
                 return Err("heartbeat watchdog expired".into());
             }
         }
         self.check_input()?;
-        let now = Instant::now();
+        let now = self.clock_now();
         self.last_tick = Some(now);
         for i in 0..self.profile.rules.len() {
-            let (enabled, cooldown, condition, actions) = {
+            let (enabled, cooldown, delay, condition, actions) = {
                 let r = &self.profile.rules[i];
                 (
                     r.enabled,
                     r.cooldown_ms,
+                    r.delay_ms,
                     r.condition.clone(),
                     r.actions.clone(),
                 )
             };
             if !enabled
                 || (!self.hotkeys_enabled && contains_key_condition(&condition))
-                || self
-                    .last_rules
-                    .get(&i)
-                    .map_or(false, |t| t.elapsed() < Duration::from_millis(cooldown))
+                || self.last_rules.get(&i).map_or(false, |t| {
+                    self.clock_now().saturating_duration_since(*t) < Duration::from_millis(cooldown)
+                })
             {
+                self.pending_rules.remove(&i);
                 continue;
             }
-            if self.matches(&condition)? {
+            if !self.matches(&condition)? {
+                self.pending_rules.remove(&i);
+                continue;
+            }
+            if delay > 0 {
+                let clock = self.clock_now();
+                let deadline = *self
+                    .pending_rules
+                    .entry(i)
+                    .or_insert(clock + Duration::from_millis(delay));
+                if clock < deadline {
+                    continue;
+                }
+            }
+            {
+                self.pending_rules.remove(&i);
                 self.execute(&actions)?;
-                self.last_rules.insert(i, Instant::now());
+                self.last_rules.insert(i, self.clock_now());
             }
         }
         Ok(())
     }
     pub fn status(&self) -> Value {
-        json!({"armed": self.armed, "paused": self.paused, "abort_latched": self.abort_latched, "held_keys": self.held_keys.len(), "held_buttons": self.held_buttons.len(), "running": true, "executing": self.running, "hotkeys_enabled": self.hotkeys_enabled && !self.dormant, "requested_hotkeys": self.hotkeys_enabled, "dormant": self.dormant})
+        let now = self.clock_now();
+        let pending: Vec<_> = self.pending_rules.iter().filter_map(|(index,deadline)| self.profile.rules.get(*index).map(|rule| json!({"name":rule.name,"remaining_ms":deadline.saturating_duration_since(now).as_millis()}))).collect();
+        let rules: Vec<_> = self.profile.rules.iter().enumerate().map(|(index,rule)| json!({"name":rule.name,"enabled":rule.enabled,"cooldown_remaining_ms":self.last_rules.get(&index).map_or(0,|last| rule.cooldown_ms.saturating_sub(now.saturating_duration_since(*last).as_millis().min(u64::MAX as u128) as u64))})).collect();
+        json!({"pending_rules":pending,"rules":rules,"observe_only": self.observe_only, "armed": self.armed, "paused": self.paused, "abort_latched": self.abort_latched, "held_keys": self.held_keys.len(), "held_buttons": self.held_buttons.len(), "running": true, "executing": self.running, "hotkeys_enabled": self.hotkeys_enabled && !self.dormant && !self.observe_only, "requested_hotkeys": self.hotkeys_enabled, "dormant": self.dormant})
     }
+}
+fn pixel_pattern(pattern: &str) -> Result<(u32, u32)> {
+    let value = pattern.strip_prefix('#').unwrap_or(pattern);
+    if value.len() != 6 {
+        return Err("pixel pattern must contain six hex digits or wildcards".into());
+    }
+    let mut color = 0u32;
+    let mut mask = 0u32;
+    for digit in value.chars() {
+        color <<= 4;
+        mask <<= 4;
+        if matches!(digit, '*' | '?') {
+            continue;
+        }
+        color |= digit
+            .to_digit(16)
+            .ok_or("pixel pattern contains an invalid digit")?;
+        mask |= 15;
+    }
+    Ok((color, mask))
 }
 fn contains_key_condition(c: &Condition) -> bool {
     match c {
@@ -875,6 +1067,7 @@ mod tests {
             condition: Condition::Always,
             actions: vec![Action::Tap { key: 10 }],
             cooldown_ms: 10_000,
+            delay_ms: 0,
             enabled: true,
         });
         let mut e = Engine::new(
@@ -1001,5 +1194,39 @@ mod tests {
                 .iter()
                 .any(|v| v["kind"] == "up")
         );
+    }
+    #[test]
+    fn observe_only_refuses_arm_and_hotkey_disable_releases() {
+        let events = Arc::new(Mutex::new(vec![]));
+        let dir = std::env::temp_dir().join(format!("rhk-observe-{}", now_ms()));
+        let mut engine = Engine::new(Fake::new(events.clone()), profile(), dir.clone()).unwrap();
+        engine.set_observe_only(true).unwrap();
+        assert!(engine.arm().is_err());
+        assert!(engine.execute(&[Action::Tap { key: 65 }]).is_err());
+        assert!(events.lock().unwrap().is_empty());
+        engine.set_observe_only(false).unwrap();
+        engine.arm().unwrap();
+        engine
+            .execute(&[
+                Action::Key {
+                    key: 65,
+                    down: true,
+                },
+                Action::Button {
+                    button: 1,
+                    down: true,
+                },
+            ])
+            .unwrap();
+        engine.set_hotkeys_enabled(false).unwrap();
+        assert!(
+            engine.input_events(0)["held"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(engine.status()["hotkeys_enabled"], false);
+        drop(engine);
+        let _ = fs::remove_dir_all(dir);
     }
 }

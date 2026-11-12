@@ -5,6 +5,7 @@ from .client import (
 )
 from .database import Database
 from .input_monitor import InputMonitor
+from .simulation import simulate
 from .tools import ToolError, ToolRegistry, default_registry
 
-__all__ = ["Action", "Client", "Database", "InputMonitor", "Point", "Profile", "Region", "RpcError", "RustyHotkeyError", "ToolError", "ToolRegistry", "default_registry"]
+__all__ = ["Action", "Client", "Database", "InputMonitor", "Point", "Profile", "Region", "RpcError", "RustyHotkeyError", "ToolError", "ToolRegistry", "default_registry", "simulate"]

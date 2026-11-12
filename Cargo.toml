@@ -20,6 +20,7 @@ mlua = { version = "0.12.2", features = ["lua54", "vendored", "serialize"] }
 windows = { version = "0.62.2", features = [
   "Foundation", "Graphics_Imaging", "Media_Ocr", "Storage_Streams",
   "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com",
+  "Win32_System_Diagnostics_Debug",
   "Win32_System_DataExchange", "Win32_System_Memory",
   "Win32_System_LibraryLoader", "Win32_UI_HiDpi",
   "Win32_Networking_WinHttp",

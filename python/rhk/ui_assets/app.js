@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  const state = { bots: [], providers: [], threads: {}, active_bot_id: null, tasks: [], submitting: false, editingBot: null };
+  const state = { bots: [], providers: [], threads: {}, handoffs: [], active_bot_id: null, tasks: [], submitting: false, editingBot: null };
   const accents = ['#73b8ff', '#c896ff', '#ff9d70', '#5ed6ba', '#f2c766', '#ff7195'];
   const portraitPositions = ['0% 0%', '50% 0%', '100% 0%', '0% 100%', '50% 100%', '100% 100%'];
   function token() { const match = location.hash.match(/(?:^#|&)token=([^&]+)/); if (match) { sessionStorage.setItem('rhk_token', decodeURIComponent(match[1])); history.replaceState(null, '', location.pathname + location.search); } return sessionStorage.getItem('rhk_token') || ''; }
@@ -21,6 +21,9 @@
     const list = $('task-list'); list.replaceChildren();
     if (!state.tasks.length) { const empty = document.createElement('p'); empty.className = 'empty-state'; empty.textContent = 'No active tasks'; list.append(empty); }
     for (const task of state.tasks) { const row = document.createElement('div'); row.className = 'task'; const status = document.createElement('span'); status.className = 'task-status'; status.textContent = task.status === 'done' ? '✓' : task.status === 'error' ? '!' : '•'; const label = document.createElement('span'); label.textContent = task.status === 'done' ? 'Response complete' : task.status === 'error' ? 'Response failed' : 'Response in progress'; row.append(status, label); list.append(row); }
+    const handoffs = state.handoffs.filter(x => x.source_bot_id === state.active_bot_id || x.target_bot_id === state.active_bot_id).slice(-10).reverse();
+    const handoffList = $('handoff-list'); handoffList.replaceChildren(); $('handoff-empty').hidden = handoffs.length > 0;
+    for (const handoff of handoffs) { const row = document.createElement('div'); row.className = 'task'; const label = id => state.bots.find(x => x.id === id)?.name || id; row.textContent = `${label(handoff.source_bot_id)} → ${label(handoff.target_bot_id)}`; row.title = handoff.response || ''; handoffList.append(row); }
   }
   function render() { renderBots(); renderTranscript(); renderContext(); }
   function setSubmitting(value) { state.submitting = value; $('send-button').disabled = value; $('message').disabled = value; $('run-status').className = `run-status ${value ? 'running' : 'idle'}`; $('run-status').lastChild.textContent = value ? 'Running' : 'Idle'; }
@@ -29,7 +32,7 @@
     for (let i = 0; i < 240; i++) {
       await new Promise(resolve => setTimeout(resolve, 500));
       const result = await api('/api/tasks/' + encodeURIComponent(id)); Object.assign(task, result); renderContext();
-      if (result.status === 'done') { state.threads[botId] ||= []; state.threads[botId].push({role: 'assistant', content: result.response || ''}); try { const latest = await api('/api/state'); if (latest.threads && !Array.isArray(latest.threads)) state.threads = latest.threads; } catch {} renderTranscript(); return; }
+      if (result.status === 'done') { state.threads[botId] ||= []; state.threads[botId].push({role: 'assistant', content: result.response || ''}); try { const latest = await api('/api/state'); if (latest.threads && !Array.isArray(latest.threads)) state.threads = latest.threads; state.handoffs = latest.handoffs || []; renderContext(); } catch {} renderTranscript(); return; }
       if (result.status === 'error' || result.status === 'missing') throw new Error(result.error || 'Task is unavailable');
     }
     throw new Error('Response is taking too long. Please try again.');
@@ -97,7 +100,7 @@
     catch(e) { settingsError(e.message); } finally { button.disabled = false; }
   }
   async function boot() {
-    try { const initial = await api('/api/state'); state.bots = initial.bots || []; state.providers = initial.providers || []; state.threads = initial.threads && !Array.isArray(initial.threads) ? initial.threads : {}; state.active_bot_id = initial.active_bot_id || state.bots[0]?.id || null; render(); $('connection-status').lastChild.textContent = 'Connected'; }
+    try { const initial = await api('/api/state'); state.handoffs = initial.handoffs || []; state.bots = initial.bots || []; state.providers = initial.providers || []; state.threads = initial.threads && !Array.isArray(initial.threads) ? initial.threads : {}; state.active_bot_id = initial.active_bot_id || state.bots[0]?.id || null; render(); $('connection-status').lastChild.textContent = 'Connected'; }
     catch(e) { $('connection-status').lastChild.textContent = 'Offline'; showError(e.message); }
   }
   $('composer').addEventListener('submit', send); $('settings-button').onclick = () => openSettings(); $('save-bot').onclick = saveBot; $('delete-bot').onclick = deleteBot; $('add-provider').onclick = () => addProviderRow();

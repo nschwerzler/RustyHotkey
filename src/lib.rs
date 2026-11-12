@@ -5,6 +5,7 @@ pub mod overlay;
 pub mod platform;
 pub mod recording;
 pub mod runtime;
+pub mod simulation;
 pub mod store;
 pub mod tray;
 pub mod web;
@@ -17,6 +18,14 @@ pub type Result<T> = std::result::Result<T, String>;
 
 /// Operating-system boundary. Implementations must never inspect game memory.
 pub trait Backend {
+    /// Simulation backends may supply a bounded monotonic clock instead of wall time.
+    fn virtual_time_ms(&self) -> Option<u64> {
+        None
+    }
+    fn sleep_ms(&mut self, ms: u64) -> Result<()> {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        Ok(())
+    }
     fn target_present(&mut self) -> Result<bool> {
         self.focused()
     }
@@ -29,4 +38,7 @@ pub trait Backend {
     fn screenshot(&mut self, region: Option<model::Region>) -> Result<model::Capture>;
     fn ocr(&mut self, region: Option<model::Region>) -> Result<Vec<model::TextBox>>;
     fn notify(&mut self, message: &str, ttl_ms: u64) -> Result<()>;
+    fn sound(&mut self, _cue: model::SoundCue) -> Result<()> {
+        Err("sound is unavailable in this backend".into())
+    }
 }

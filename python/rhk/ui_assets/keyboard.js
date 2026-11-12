@@ -4,9 +4,24 @@
   const dialog = $('keyboard-dialog');
   const layout = $('keyboard-layout');
   const surface = $('keyboard-surface');
+  const sampleScenario = {
+    schema_version: 1,
+    profile: {
+      schema_version: 1,
+      target: {window_class: 'ExampleWindow', window_title: null},
+      controls: {abort: 112, reset: 113, pause: 114, resume: 115},
+      tick_ms: 20,
+      rules: []
+    },
+    frames: [{
+      at_ms: 0,
+      observation: {target_present: true, focused: true, keys_down: [], pixels: [], clipboard: '', cursor: {x: 0, y: 0}},
+      operations: [{op: 'arm'}, {op: 'execute', actions: [{type: 'tap', key: 65}]}]
+    }]
+  };
   const keys = new Map();
   const localHeld = new Set();
-  let remoteHeld = [], cursor = 0, gapCount = 0, timer = null, polling = false, demoRunning = false;
+  let remoteHeld = [], cursor = 0, gapCount = 0, timer = null, polling = false, demoRunning = false, simulationRunning = false;
   const rows = [
     [['Escape','Esc'],...Array.from({length:12},(_,i)=>[`F${i+1}`,`F${i+1}`]),['PrintScreen','PrtSc'],['ScrollLock','ScrLk'],['Pause','Pause']],
     [['Backquote','`'],...Array.from('1234567890',(x)=>[`Digit${x}`,x]),['Minus','−'],['Equal','='],['Backspace','Backspace',2],['Insert','Ins'],['Home','Home'],['PageUp','PgUp']],
@@ -44,8 +59,51 @@
     const response = await fetch(url, {...options, headers, credentials:'same-origin'}); let body = {}; try { body = await response.json(); } catch {}
     if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`); return body;
   }
+  function showSimulationResult(result) {
+    const frames = Array.isArray(result.frames) ? result.frames : [];
+    const steps = frames.flatMap((frame, frameIndex) => (Array.isArray(frame.operations) ? frame.operations : []).map((operation, operationIndex) => ({frame: frameIndex + 1, index: operationIndex + 1, ...operation})));
+    const failures = steps.filter(step => step.ok === false);
+    $('simulation-result-counts').textContent = `${steps.length} step${steps.length === 1 ? '' : 's'} · ${failures.length} failure${failures.length === 1 ? '' : 's'} · ${(Array.isArray(result.events) ? result.events.length : 0)} simulated event${result.events?.length === 1 ? '' : 's'}`;
+    const list = $('simulation-steps'); list.replaceChildren();
+    for (const step of steps) {
+      const item = document.createElement('li');
+      if (step.ok === false) item.className = 'failed';
+      const label = document.createElement('strong'); label.textContent = `Frame ${step.frame}, step ${step.index}: ${step.op || 'operation'} · ${step.ok === false ? 'failed' : 'ok'}`; item.append(label);
+      if (step.error) { const error = document.createElement('span'); error.textContent = String(step.error); item.append(error); }
+      list.append(item);
+    }
+    const lastStep = steps.at(-1);
+    $('simulation-last-state').textContent = JSON.stringify(lastStep?.status ?? result.final_status ?? {}, null, 2);
+    $('simulation-result').hidden = false;
+    $('simulation-status').textContent = failures.length ? `What-if complete with ${failures.length} failed step${failures.length === 1 ? '' : 's'}. Review the trace below.` : 'What-if complete. Review the trace below.';
+  }
+  async function runSimulation() {
+    if (simulationRunning) return;
+    const input = $('simulation-scenario').value;
+    if (new TextEncoder().encode(input).byteLength > 512 * 1024) { $('simulation-status').textContent = 'Scenario exceeds the 512 KiB editor limit.'; return; }
+    let scenario;
+    try { scenario = JSON.parse(input); }
+    catch (error) { $('simulation-status').textContent = `Invalid JSON: ${error.message}`; return; }
+    if (!scenario || typeof scenario !== 'object' || Array.isArray(scenario)) { $('simulation-status').textContent = 'Scenario JSON must be an object.'; return; }
+    simulationRunning = true;
+    $('simulation-run').disabled = true;
+    $('simulation-sample').disabled = true;
+    $('simulation-status').textContent = 'Running mock simulation…';
+    try {
+      const result = await request('/api/simulate', {method: 'POST', body: JSON.stringify({scenario})});
+      showSimulationResult(result);
+      simulationRunning = false;
+      await poll();
+    } catch (error) {
+      $('simulation-status').textContent = `Simulation failed: ${error.message}`;
+    } finally {
+      simulationRunning = false;
+      $('simulation-run').disabled = false;
+      $('simulation-sample').disabled = false;
+    }
+  }
   async function poll() {
-    if (polling || !dialog.open) return; polling = true;
+    if (polling || simulationRunning || !dialog.open) return; polling = true;
     try {
       const data = await request(`/api/input-events?after=${cursor}`); const events = Array.isArray(data.events) ? data.events : [];
       if (data.truncated || (events.length && events[0].sequence > cursor + 1)) { gapCount++; $('keyboard-drop-count').textContent = `${gapCount} event gap${gapCount === 1 ? '' : 's'}`; }
@@ -69,6 +127,9 @@
   document.addEventListener('mouseup', e => { const names = ['Mouse1','Mouse3','Mouse2','Mouse4','Mouse5']; if (names[e.button]) localEvent('up', names[e.button]); });
   window.addEventListener('blur', releaseLocal); document.addEventListener('visibilitychange', () => { if (document.hidden) releaseLocal(); });
   $('keyboard-capture').addEventListener('change', e => { if (!e.target.checked) releaseLocal(); else surface.focus(); poll(); });
+  $('simulation-scenario').value = JSON.stringify(sampleScenario, null, 2);
+  $('simulation-sample').addEventListener('click', () => { $('simulation-scenario').value = JSON.stringify(sampleScenario, null, 2); $('simulation-status').textContent = 'Generic sample loaded. The scenario has not been run.'; });
+  $('simulation-run').addEventListener('click', runSimulation);
   $('keyboard-open').addEventListener('click', () => { dialog.showModal(); surface.focus(); poll(); timer = setInterval(poll, 300); });
   $('keyboard-close').addEventListener('click', () => dialog.close());
   dialog.addEventListener('close', () => { clearInterval(timer); timer = null; releaseLocal(); $('keyboard-capture').checked = false; });

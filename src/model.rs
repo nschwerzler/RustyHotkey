@@ -27,26 +27,82 @@ pub enum InputEvent {
     Move { x: f64, y: f64 },
     Button { button: u8, down: bool },
     Text { text: String },
+    Wheel { delta: i32, horizontal: bool },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
-    Tap { key: u16 },
-    Key { key: u16, down: bool },
-    Move { x: f64, y: f64 },
-    Click { button: u8 },
-    Button { button: u8, down: bool },
-    Text { text: String },
-    Wait { ms: u64 },
+    Tap {
+        key: u16,
+    },
+    Key {
+        key: u16,
+        down: bool,
+    },
+    Move {
+        x: f64,
+        y: f64,
+    },
+    Click {
+        button: u8,
+    },
+    ClickBurst {
+        button: u8,
+        count: u32,
+        interval_ms: u64,
+        lock_position: bool,
+    },
+    Button {
+        button: u8,
+        down: bool,
+    },
+    Text {
+        text: String,
+    },
+    Scroll {
+        delta: i32,
+        #[serde(default)]
+        horizontal: bool,
+    },
+    Wait {
+        ms: u64,
+    },
     Pause,
-    SetHotkeys { enabled: bool },
-    Notify { message: String, ttl_ms: u64 },
+    SetHotkeys {
+        enabled: bool,
+    },
+    ToggleHotkeys,
+    Sound {
+        cue: SoundCue,
+    },
+    Notify {
+        message: String,
+        ttl_ms: u64,
+    },
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SoundCue {
+    Default,
+    Info,
+    Warning,
+    Error,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Condition {
     Always,
     Focused,
+    Modifiers {
+        #[serde(default)]
+        shift: Option<bool>,
+        #[serde(default)]
+        control: Option<bool>,
+        #[serde(default)]
+        alt: Option<bool>,
+        #[serde(default)]
+        meta: Option<bool>,
+    },
     KeyDown {
         key: u16,
     },
@@ -54,6 +110,10 @@ pub enum Condition {
         point: Point,
         color: u32,
         tolerance: u8,
+    },
+    PixelPattern {
+        point: Point,
+        pattern: String,
     },
     ClipboardContains {
         text: String,
@@ -75,6 +135,8 @@ pub struct Rule {
     pub condition: Condition,
     pub actions: Vec<Action>,
     pub cooldown_ms: u64,
+    #[serde(default)]
+    pub delay_ms: u64,
     #[serde(default = "yes")]
     pub enabled: bool,
 }

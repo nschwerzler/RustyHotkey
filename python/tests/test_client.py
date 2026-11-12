@@ -94,8 +94,9 @@ class ClientTests(unittest.TestCase):
 
   def test_script_flags_and_hotkeys(self):
     with tempfile.TemporaryDirectory() as d:
-      c = client(Path(d), script_path=Path(d) / "script.lua", no_tray=True)
+      c = client(Path(d), script_path=Path(d) / "script.lua", no_tray=True, observe_only=True)
       self.assertIn("--script", c.command); self.assertIn("--no-tray", c.command)
+      self.assertIn('--observe-only',c.command)
       with c:
         self.assertEqual(c.hotkeys(False)["op"], "hotkeys")
 

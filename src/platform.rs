@@ -364,6 +364,21 @@ mod windows_backend {
     }
 
     impl Backend for WindowsBackend {
+        fn sound(&mut self, cue: model::SoundCue) -> Result<()> {
+            use windows::Win32::{
+                System::Diagnostics::Debug::MessageBeep,
+                UI::WindowsAndMessaging::{
+                    MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
+                },
+            };
+            let kind = match cue {
+                model::SoundCue::Default => MB_OK,
+                model::SoundCue::Info => MB_ICONINFORMATION,
+                model::SoundCue::Warning => MB_ICONWARNING,
+                model::SoundCue::Error => MB_ICONERROR,
+            };
+            unsafe { MessageBeep(kind) }.map_err(|e| e.to_string())
+        }
         fn target_present(&mut self) -> Result<bool> {
             self.refresh()
         }
@@ -405,7 +420,9 @@ mod windows_backend {
                 if c.0 == 0xffff_ffff {
                     return Err("GetPixel failed".into());
                 }
-                Ok(c.0 as u32)
+                // COLORREF stores BGR; the public profile contract uses RRGGBB.
+                let bgr = c.0;
+                Ok(((bgr & 0xff) << 16) | (bgr & 0xff00) | ((bgr >> 16) & 0xff))
             }
         }
         fn clipboard(&mut self) -> Result<String> {
@@ -448,6 +465,29 @@ mod windows_backend {
         }
         fn emit(&mut self, e: &model::InputEvent) -> Result<()> {
             match e {
+                model::InputEvent::Wheel { delta, horizontal } => {
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{
+                        MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL,
+                    };
+                    let input = INPUT {
+                        r#type: INPUT_TYPE(0),
+                        Anonymous: INPUT_0 {
+                            mi: MOUSEINPUT {
+                                mouseData: *delta as u32,
+                                dwFlags: if *horizontal {
+                                    MOUSEEVENTF_HWHEEL
+                                } else {
+                                    MOUSEEVENTF_WHEEL
+                                },
+                                ..Default::default()
+                            },
+                        },
+                    };
+                    if unsafe { SendInput(&[input], size_of::<INPUT>() as i32) } != 1 {
+                        return Err("SendInput failed".into());
+                    }
+                    Ok(())
+                }
                 model::InputEvent::Key { key, down } => {
                     if *key == 0 {
                         return Err("virtual key must be nonzero".into());
@@ -672,6 +712,15 @@ mod windows_backend {
                 let _ = ReleaseDC(Some(HWND(first.0)), dc);
             }
             let image = backend.screenshot(None).unwrap();
+            assert_eq!(
+                backend
+                    .pixel(model::Point {
+                        x: 2.0 / 64.0,
+                        y: 2.0 / 64.0
+                    })
+                    .unwrap(),
+                0x010203
+            );
             assert_eq!(
                 image.bgra.len(),
                 image.width as usize * image.height as usize * 4

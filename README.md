@@ -11,6 +11,13 @@ keyboard and mouse input, condition evaluation, pixel matching, screenshot and
 OCR access, notifications, recording/replay, and bounded workflows. Applications
 supply their own profiles, bindings, calibration and business logic.
 
+Use `rhk simulate SCENARIO.json` to exercise the real engine with scripted
+observations and a mock backend; simulation records effects without sending
+operating-system input. Live `run` and `rpc` sessions also support
+`--observe-only`, which leaves inspection available while refusing arm and
+input-producing operations. See [scenario simulation](docs/simulation.md),
+[API contracts](docs/api.md), and [capabilities](docs/capabilities.md).
+
 ## Build and check
 
 Install stable Rust with the Windows MSVC toolchain and the Visual Studio C++

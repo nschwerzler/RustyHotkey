@@ -55,6 +55,20 @@
     <p class="keyboard-hint">Capture stays in this page and excludes text fields and controls. Select the keyboard surface, then press keys.</p>
     <div id="keyboard-surface" class="keyboard-surface" tabindex="0" aria-label="Keyboard input surface"><div id="keyboard-layout" class="keyboard-layout" aria-label="Keyboard visualization"></div><div id="keyboard-numpad" class="keyboard-numpad" aria-label="Numeric keypad"></div><div id="keyboard-mouse" class="keyboard-mouse" aria-label="Mouse buttons"></div></div>
     <div class="keyboard-info"><section><div class="keyboard-section-title"><h3>Held</h3><span id="keyboard-held-count">0</span></div><p id="keyboard-held" class="keyboard-held">No keys held</p></section><section><div class="keyboard-section-title"><h3>Event timeline</h3><span id="keyboard-drop-count">No gaps</span></div><ol id="keyboard-timeline" class="keyboard-timeline" aria-live="polite"></ol></section></div>
+    <details class="simulation-panel">
+      <summary>Scenario what-if simulation</summary>
+      <p class="simulation-note">Simulation only. This runs a scenario against a mock backend and never sends input to a game or operating system.</p>
+      <label class="simulation-label" for="simulation-scenario">Scenario JSON</label>
+      <textarea id="simulation-scenario" class="simulation-scenario" spellcheck="false" aria-describedby="simulation-editor-help"></textarea>
+      <div class="simulation-actions"><p id="simulation-editor-help" class="simulation-note">Paste a version 1 scenario, up to 512 KiB. Validate JSON before running.</p><div><button id="simulation-sample" class="secondary-button" type="button">Load generic sample</button><button id="simulation-run" class="primary-button" type="button">Run what-if</button></div></div>
+      <p id="simulation-status" class="simulation-status" role="status" aria-live="polite">Ready. The scenario has not been run.</p>
+      <section id="simulation-result" class="simulation-result" aria-labelledby="simulation-result-title" hidden>
+        <h3 id="simulation-result-title">Simulation result</h3>
+        <p id="simulation-result-counts" class="simulation-note"></p>
+        <ol id="simulation-steps" class="simulation-steps"></ol>
+        <h4>Last state</h4><pre id="simulation-last-state" class="simulation-last-state"></pre>
+      </section>
+    </details>
   </dialog>
   <script src="app.js"></script>
   <script src="keyboard.js"></script>

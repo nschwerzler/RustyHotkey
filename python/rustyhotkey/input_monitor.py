@@ -160,6 +160,20 @@ class InputMonitor:
             self._workers[source] = worker
         worker.start()
 
+    def simulation(self, result: dict[str, Any], source: str = 'scenario') -> None:
+        """Display a mock engine trace, omitting text contents and pointer moves."""
+        self.publish('sim:' + source, [{'kind': 'reset'}])
+        batch = []
+        for item in result.get('events', []):
+            event = item.get('event', {})
+            if event.get('type') == 'key': key = key_code(event['key'])
+            elif event.get('type') == 'button': key = f"Mouse{event['button']}"
+            else: continue
+            batch.append({'kind': 'down' if event['down'] else 'up', 'key': key})
+            if len(batch) == 256:
+                self.publish('sim:' + source, batch); batch = []
+        if batch: self.publish('sim:' + source, batch)
+
     def close(self) -> None:
         self._stop.set()
         with self._lock:

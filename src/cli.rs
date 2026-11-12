@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::{self, BufRead, Write},
+    io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc,
@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HELP: &str = "RHK — RustyHotkey (Windows x64)\n\nCommands:\n  rhk help | capabilities | tools\n  rhk validate profile|workflow|recording FILE\n  rhk preview WORKFLOW\n  rhk run|rpc PROFILE [--script PATH] [--no-tray]\n  rhk overlay PROFILE WIDGET.lua [WIDGET.lua...]\n  rhk ui [--no-open] [--port PORT] [--data-dir PATH]\n  rhk tray [--script PATH --engine-pid PID]\n  rhk fetch URL [--database PATH] [--ttl-ms N] [--allow-http]\n  rhk record PROFILE OUTPUT [--include-text]\n  rhk replay PROFILE RECORDING [SPEED]\n  rhk db DATABASE\n\nProfiles and runtime data are caller supplied. run starts paused; the configured\nphysical resume key arms the engine. rpc uses newline-delimited JSON requests.\nSee docs/usage.md, docs/python.md and llms.txt for the API contract.";
+const HELP: &str = "RHK — RustyHotkey (Windows x64)\n\nCommands:\n  rhk help | capabilities | tools\n  rhk validate profile|workflow|recording|simulation FILE\n  rhk preview WORKFLOW\n  rhk simulate SCENARIO.json\n  rhk run|rpc PROFILE [--script PATH] [--no-tray] [--observe-only]\n  rhk overlay PROFILE WIDGET.lua [WIDGET.lua...]\n  rhk ui [--no-open] [--port PORT] [--data-dir PATH]\n  rhk tray [--script PATH --engine-pid PID]\n  rhk fetch URL [--database PATH] [--ttl-ms N] [--allow-http]\n  rhk record PROFILE OUTPUT [--include-text]\n  rhk replay PROFILE RECORDING [SPEED]\n  rhk db DATABASE\n\nProfiles and runtime data are caller supplied. run starts paused; the configured\nphysical resume key arms the engine. rpc uses newline-delimited JSON requests.\nSee docs/usage.md, docs/python.md and llms.txt for the API contract.";
 
 pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let args: Vec<_> = args.collect();
@@ -28,7 +28,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
             Ok(())
         }
         "capabilities" => output(
-            &json!({"name":"rhk","version":env!("CARGO_PKG_VERSION"),"architecture":"x86_64","platform":"windows","interfaces":["rust","python","cli","json_lines"],"capabilities":["conditions","hotkeys","input","pixels","clipboard","capture","ocr","notifications","workflows","recording","replay","database","cache"]}),
+            &json!({"name":"rhk","version":env!("CARGO_PKG_VERSION"),"architecture":"x86_64","platform":"windows","interfaces":["rust","python","cli","json_lines"],"capabilities":["conditions","hotkeys","input","pixels","clipboard","capture","ocr","notifications","workflows","recording","replay","database","cache","web_fetch","lua_widgets","overlay","tray","bots","simulation","observe_only","sound"]}),
         ),
         "validate" => {
             let kind = arg(&args, 1, "kind")?;
@@ -37,11 +37,39 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
                 "profile" => validate_profile(&read_json::<Profile>(path)?)?,
                 "workflow" => workflow::validate(&read_json::<Workflow>(path)?)?,
                 "recording" => recording::validate(&read_json::<Recording>(path)?)?,
-                _ => return Err("kind must be profile, workflow or recording".into()),
+                "simulation" => crate::simulation::validate_scenario(&read_json::<
+                    crate::simulation::SimulationScenario,
+                >(path)?)?,
+                _ => return Err("kind must be profile, workflow, recording or simulation".into()),
             };
             output(&json!({"valid":true,"kind":kind}))
         }
         "preview" => output(&workflow::dry_run(&read_json(arg(&args, 1, "workflow")?)?)?),
+        "simulate" => {
+            let path = arg(&args, 1, "scenario")?;
+            let mut bytes = Vec::new();
+            fs::File::open(path)
+                .map_err(|e| e.to_string())?
+                .take(4 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if bytes.len() > 4 * 1024 * 1024 {
+                return Err("scenario exceeds 4 MiB".into());
+            }
+            let scenario = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos();
+            let dir = state_dir()?
+                .join("simulations")
+                .join(format!("{}-{nonce}", std::process::id()));
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let result = crate::simulation::run_scenario(scenario, &dir);
+            let _ = fs::remove_dir_all(&dir);
+            let value = serde_json::to_value(result?).map_err(|e| e.to_string())?;
+            output(&value)
+        }
         "rpc" | "run" => {
             let path = arg(&args, 1, "profile")?;
             let profile: Profile = read_json(path)?;
@@ -49,6 +77,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
             let _status = StatusFile::new(&dir)?;
             let backend = WindowsBackend::new(profile.target.clone())?;
             let mut engine = Engine::new(backend, profile, dir.clone())?;
+            engine.set_observe_only(args.iter().any(|arg| arg == "--observe-only"))?;
             let script = option(&args, "--script")?.unwrap_or(path);
             if !args.iter().any(|a| a == "--no-tray") {
                 spawn_tray(script)?;
@@ -262,7 +291,7 @@ fn dispatch<B: Backend>(engine: &mut Engine<B>, request: &Value) -> Result<Value
             Ok(json!({"alive":true}))
         }
         "hotkeys" => {
-            engine.set_hotkeys_enabled(field(request, "enabled")?);
+            engine.set_hotkeys_enabled(field(request, "enabled")?)?;
             Ok(engine.status())
         }
         "input_events" => {
@@ -629,6 +658,10 @@ impl<B: Backend> RpcSession<B> {
                 self.last_render = Instant::now() - Duration::from_secs(1);
                 Ok(self.render())
             }
+            "sound" => {
+                self.engine.backend.sound(field(request, "cue")?)?;
+                Ok(json!({"played":true}))
+            }
             "widget_state" => {
                 let state: Value = field(request, "state")?;
                 if !state.is_object() {
@@ -708,6 +741,11 @@ fn tool_catalog() -> Value {
     let runtime = [
         ("status", json!({}), false),
         (
+            "sound",
+            json!({"cue":{"type":"string","enum":["default","info","warning","error"]}}),
+            false,
+        ),
+        (
             "input_events",
             json!({"after":{"type":"integer","minimum":0}}),
             false,
@@ -775,6 +813,13 @@ fn tool_schema(op: &str, fields: &Value) -> Value {
         for (name, description) in fields {
             let optional = name.ends_with('?');
             let key = name.trim_end_matches('?');
+            if description.is_object() {
+                properties.insert(key.into(), description.clone());
+                if !optional {
+                    required.push(key.into());
+                }
+                continue;
+            }
             let description = description.as_str().unwrap_or("");
             let kind = if description.starts_with("array") {
                 "array"

@@ -7,8 +7,11 @@ rhk capabilities
 rhk tools
 rhk validate profile profile.json
 rhk validate workflow workflow.json
+rhk validate simulation scenario.json
 rhk preview workflow.json
+rhk simulate scenario.json
 rhk rpc profile.json
+rhk rpc profile.json --observe-only
 rhk db state.db
 rhk ui
 rhk tray
@@ -46,6 +49,12 @@ with Database("state.db") as db:
 ```
 
 Use `Client.evaluate`, `pixel`, `clipboard`, `screenshot`, `ocr`, `notify`, and `workflow` for inspection and bounded orchestration. Keep live actions behind a caller-owned profile and focus check. Use `Client.pause()` or `Client.abort()` when cancellation is needed. `abort` is the emergency path; its physical control cannot be disabled.
+
+Use `Client(profile, observe_only=True)` for an inspection session that refuses
+arm and input-producing operations. Use `rhk validate simulation FILE` to check
+a scenario, then `rhk simulate FILE` to exercise it against the mock backend
+without operating-system input. See [simulation.md](simulation.md) for the
+scenario format and bounds.
 
 Lua is optional and explicit:
 

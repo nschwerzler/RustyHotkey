@@ -11,6 +11,15 @@ the keyboard surface to try it. Text fields and controls are excluded; changing
 focus, hiding the page or closing the monitor releases local highlights. This
 is not a system-wide keyboard listener.
 
+The dialog also contains a collapsible **Scenario what-if simulation** editor.
+Paste a version 1 scenario or load its generic sample, then choose **Run
+what-if**. The editor checks JSON and caps requests at 512 KiB. The authenticated
+`POST /api/simulate` endpoint runs the bounded Rust simulator against its mock
+backend, returns the operation trace and final status, and publishes simulated
+key/button events to this timeline as `sim:scenario`. This does not send
+operating-system input. The CLI and Rust scenario API are documented in
+[simulation.md](simulation.md).
+
 ## Script integration
 
 Embedding applications share the bot service's `input_monitor` with their
@@ -43,6 +52,7 @@ events simulated and never emits operating-system input. A source `reset` event
 clears its held state. Batches are bounded to 256 entries. This feed is transient
 in memory, never a database of typed text.
 
-The monitor visualizes output; it does not simulate a target application's
-responses, pixel state, focus or workflow conditions. A preview remains distinct
-from a full scenario simulator.
+Scenario simulation also scripts target presence, focus, pressed keys, pixel
+samples, clipboard text and cursor position between operations. Its result
+summarizes those effects; the Keyboard timeline displays only simulated key and
+button events, while text contents and pointer movement remain omitted.

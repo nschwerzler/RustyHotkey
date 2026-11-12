@@ -77,6 +77,10 @@ class Action:
         return cls("click", {"button": button})
 
     @classmethod
+    def scroll(cls, delta: int, horizontal: bool = False) -> "Action":
+        return cls("scroll", {"delta": delta, "horizontal": horizontal})
+
+    @classmethod
     def wait(cls, ms: int) -> "Action":
         return cls("wait", {"ms": ms})
 
@@ -109,7 +113,7 @@ class Client:
                  timeout: float = 5.0, close_timeout: float = 1.0,
                  heartbeat_interval: float | None = 0.5, mode: str = "rpc",
                  close_op: str | None = "pause", script_path: str | Path | None = None,
-                 no_tray: bool = False) -> None:
+                 no_tray: bool = False, observe_only: bool = False) -> None:
         self.profile = str(profile.path if isinstance(profile, Profile) else profile)
         executable = os.environ.get("RHK_BINARY", "rhk") if command is None else None
         self.command = list(command or (executable,)) + [mode, self.profile]
@@ -117,6 +121,8 @@ class Client:
             self.command += ["--script", str(script_path)]
         if no_tray:
             self.command.append("--no-tray")
+        if observe_only:
+            self.command.append("--observe-only")
         self.timeout = timeout
         self.close_timeout = close_timeout
         self._process: subprocess.Popen[str] | None = None
@@ -236,6 +242,7 @@ class Client:
     def notify(self, message: str, ttl_ms: int = 0) -> Any: return self.request("notify", message=message, ttl_ms=ttl_ms)
     def workflow(self, workflow: Mapping[str, Any]) -> Any: return self.request("workflow", workflow=workflow)
     def hotkeys(self, enabled: bool) -> Any: return self.request("hotkeys", enabled=enabled)
+    def sound(self, cue: str = "default") -> Any: return self.request("sound", cue=cue)
     def load_widgets(self, paths: Iterable[str], state: Mapping[str, Any] | None = None) -> Any:
         return self.request("widgets", paths=list(paths), state=dict(state or {}))
     def update_widget_state(self, state: Mapping[str, Any]) -> Any:
