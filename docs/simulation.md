@@ -7,7 +7,7 @@ and the input effects of each rule tick. It does not install a keyboard hook.
 
 A scenario contains a normal version 1 profile and a bounded sequence of
 observation frames. Each frame replaces the observed target presence, focus,
-keys, pixel samples, clipboard text, and cursor position, then runs its
+keys, pixel samples, clipboard text, OCR word boxes, and cursor position, then runs its
 operations. Frame times are virtual milliseconds, strictly increasing from
 zero and limited to 24 hours. Output input events include their virtual
 timestamp. During an action wait or click burst, the clock advances in bounded
@@ -37,6 +37,7 @@ contained.
         "keys_down": [],
         "pixels": [{ "point": { "x": 0.5, "y": 0.5 }, "color": 3368601 }],
         "clipboard": "ready",
+        "ocr": [{ "text": "Ready", "region": { "x": 0.1, "y": 0.2, "width": 0.2, "height": 0.1 } }],
         "cursor": { "x": 0.5, "y": 0.5 }
       },
       "operations": [
@@ -65,8 +66,12 @@ is used by `Engine` for its abort latch and pause state; callers should create a
 unique scenario directory under `%APPDATA%/RustyHotkey/simulation` and remove it
 after the engine has been dropped. Keep scenario files and build output outside
 the repository. The simulator supports observations used by conditions and
-input safety. Screenshot and OCR operations return an explicit unsupported
-error, and notifications and sound cues are returned as simulated effects.
+input safety. Screenshot capture remains unsupported. OCR conditions read the
+frame's scripted word boxes, join their text in order, and optionally filter
+boxes to those overlapping the requested normalized region. Each box has
+non-empty text up to 4,096 bytes and a valid normalized region; each frame
+supports at most 10,000 boxes within the existing combined observation and
+result limits. Notifications and sound cues are returned as simulated effects.
 The simulator bounds a scenario to 10,000 frames and operations, a 24 hour
 virtual timeline, a combined input trace of 100,000 events/1 MiB, capped
 notifications and sounds, and an 8 MiB serialized result.
@@ -82,3 +87,7 @@ fn run(input: &str, state_dir: &Path) -> rustyhotkey::Result<()> {
     Ok(())
 }
 ```
+
+OCR is opt-in through `ocr_contains` conditions. Live OCR calls may be
+expensive, so workflows should choose polling intervals that fit their latency
+and resource budget instead of checking at every engine tick.

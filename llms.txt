@@ -18,6 +18,17 @@ Web fetch uses the Rust `FetchRequest`/`FetchResponse` module, with bounded GET,
 
 ## UI and bots
 
+The Scripts workspace stores Python, Lua and JSON drafts outside source. Use
+`list_scripts`/`read_script` to inspect them and obtain a revision; the mutating
+`save_script` tool requires action-tool permission and the current revision for
+updates. Saving performs syntax checks where supported and never executes a
+draft. See [script workspace](docs/scripts.md).
+
+The default bot registry provides bounded HTTPS fetch and cache tools in its
+own `rhk.tools.<namespace>` space. Cache writes require action-tool permission;
+application settings and transcripts are outside that tool cache. See
+[built-in tools](docs/tools.md).
+
 Lua widgets are opt-in and explicitly selected by Python. Zero Lua files means zero overlay. Lua returns an overlay specification; the native overlay is click-through, focus-aware, and excluded from capture. There is no default HUD. The tray has an independent per-script icon and state color, with Pause Script, Edit Script, Exit Script, and Hotkeys Enabled controls; target absence is dormant, and the emergency abort path cannot be disabled.
 
 The optional local RHK BOT workspace is generic: a master RHK script expert plus configurable communicating bots, a small avatar gallery, subtle bright-ring motion, and custom OpenAI-compatible, official OpenAI, or Anthropic providers. Its built-in `framework_reference` describes installed interfaces; `simulate_profile` runs a mock scenario, reports failures and publishes simulated events to Keyboard. API keys are write-only vault entries and never echoed. Generated scripts are drafts until a separate explicit save/execute action. Bounded typed handoffs use read-only tools and never inherit permission to emit input; service shutdown closes the input monitor and tool registry and stops queued work.

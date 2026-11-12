@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 
 class ToolError(ValueError):
@@ -11,8 +14,41 @@ class ToolError(ValueError):
 
 def _validate(schema: dict[str, Any], value: Any, where: str = "input") -> None:
     typ = schema.get("type")
-    ok = {"object": isinstance(value, dict), "array": isinstance(value, list), "string": isinstance(value, str), "number": isinstance(value, (int, float)) and not isinstance(value, bool), "integer": isinstance(value, int) and not isinstance(value, bool), "boolean": isinstance(value, bool)}
-    if typ in ok and not ok[typ]: raise ToolError(f"{where} must be {typ}")
+    matches = {
+        "object": lambda x: isinstance(x, dict),
+        "array": lambda x: isinstance(x, list),
+        "string": lambda x: isinstance(x, str),
+        "number": lambda x: isinstance(x, (int, float)) and not isinstance(x, bool),
+        "integer": lambda x: isinstance(x, int) and not isinstance(x, bool),
+        "boolean": lambda x: isinstance(x, bool),
+        "null": lambda x: x is None,
+    }
+    if typ is not None:
+        types = typ if isinstance(typ, list) else [typ]
+        if not types or any(not isinstance(item, str) or item not in matches for item in types):
+            raise ToolError(f"{where} uses an unsupported type declaration")
+        if not any(matches[item](value) for item in types):
+            raise ToolError(f"{where} must be one of {', '.join(types)}")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ToolError(f"{where} must be finite")
+    if "enum" in schema and not any(
+        (isinstance(value, (int, float)) and not isinstance(value, bool)
+         and isinstance(option, (int, float)) and not isinstance(option, bool) and value == option)
+        or (type(value) is type(option) and value == option)
+        for option in schema["enum"]
+    ):
+        raise ToolError(f"{where} is not an allowed value")
+    if typ is not None and any(item in types for item in ("integer", "number")) and isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]: raise ToolError(f"{where} is below its minimum")
+        if "maximum" in schema and value > schema["maximum"]: raise ToolError(f"{where} is above its maximum")
+    if isinstance(value, str):
+        if "minLength" in schema and len(value) < schema["minLength"]: raise ToolError(f"{where} is too short")
+        if "maxLength" in schema and len(value) > schema["maxLength"]: raise ToolError(f"{where} is too long")
+    if isinstance(value, list):
+        if "minItems" in schema and len(value) < schema["minItems"]: raise ToolError(f"{where} has too few items")
+        if "maxItems" in schema and len(value) > schema["maxItems"]: raise ToolError(f"{where} has too many items")
+        if "items" in schema:
+            for i, item in enumerate(value): _validate(schema["items"], item, f"{where}[{i}]")
     if isinstance(value, dict):
         for key in schema.get("required", []):
             if key not in value: raise ToolError(f"{where}.{key} is required")
@@ -61,8 +97,49 @@ class ToolRegistry:
 def default_registry(database: Any | None = None, fetch: Callable[[str], Any] | None = None) -> ToolRegistry:
     """Build safe generic tools. Application-specific tools are registered by callers."""
     r = ToolRegistry()
+    namespace_schema = {"type": "string", "minLength": 1, "maxLength": 64}
+    key_schema = {"type": "string", "minLength": 1, "maxLength": 128}
+    ttl_schema = {"type": "integer", "minimum": 1, "maximum": 86_400_000}
+
+    def scoped(namespace: str, key: str) -> tuple[str, str]:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*", namespace):
+            raise ToolError("namespace must contain only letters, digits, dots, underscores, or hyphens")
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]+", key):
+            raise ToolError("key must contain only letters, digits, dots, underscores, colons, or hyphens")
+        return f"rhk.tools.{namespace}", key
+
     if database is not None:
-        r.register("cache_get", "Read a namespaced RHK cache value.", {"type": "object", "properties": {"namespace": {"type": "string"}, "key": {"type": "string"}}, "required": ["namespace", "key"], "additionalProperties": False}, lambda x: database.cache_get(x["namespace"], x["key"]))
-    if fetch is not None:
-        r.register("fetch", "Fetch an application-approved URL.", {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"], "additionalProperties": False}, lambda x: fetch(x["url"]))
+        def cache_get(x: dict[str, Any]) -> Any:
+            ns, key = scoped(x["namespace"], x["key"])
+            return database.cache_get(ns, key)
+
+        def cache_put(x: dict[str, Any]) -> Any:
+            ns, key = scoped(x["namespace"], x["key"])
+            try:
+                encoded = json.dumps(x["value"], ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+            except (TypeError, ValueError, UnicodeError) as error:
+                raise ToolError("cache value must be JSON serializable") from error
+            if len(encoded) > 65_536: raise ToolError("cache value exceeds 64 KiB")
+            return database.cache_put(ns, key, x["value"], x["ttl_ms"])
+
+        def cache_invalidate(x: dict[str, Any]) -> Any:
+            ns, key = scoped(x["namespace"], x["key"])
+            return database.cache_invalidate(ns, key)
+
+        r.register("cache_get", "Read a value from the tool-owned cache namespace.", {"type": "object", "properties": {"namespace": namespace_schema, "key": key_schema}, "required": ["namespace", "key"], "additionalProperties": False}, cache_get)
+        r.register("cache_put", "Write a JSON value to the tool-owned cache for at most one day.", {"type": "object", "properties": {"namespace": namespace_schema, "key": key_schema, "value": {}, "ttl_ms": ttl_schema}, "required": ["namespace", "key", "value", "ttl_ms"], "additionalProperties": False}, cache_put, mutating=True)
+        r.register("cache_invalidate", "Remove a value from the tool-owned cache.", {"type": "object", "properties": {"namespace": namespace_schema, "key": key_schema}, "required": ["namespace", "key"], "additionalProperties": False}, cache_invalidate, mutating=True)
+
+    if fetch is not None or database is not None:
+        def do_fetch(x: dict[str, Any]) -> Any:
+            url = x["url"]
+            try: parsed = urlsplit(url)
+            except ValueError as error: raise ToolError("fetch URL is invalid") from error
+            if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+                raise ToolError("fetch requires an HTTPS URL without embedded credentials")
+            if fetch is not None:
+                return fetch(url)
+            return database.fetch(url, timeout_ms=10_000, max_bytes=65_536, ttl_ms=60_000, allow_http=False)
+
+        r.register("fetch", "Fetch an HTTPS URL with bounded time, size, and a 60-second cache.", {"type": "object", "properties": {"url": {"type": "string", "minLength": 1, "maxLength": 4096}}, "required": ["url"], "additionalProperties": False}, do_fetch)
     return r

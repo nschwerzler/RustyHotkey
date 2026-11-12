@@ -97,6 +97,23 @@ fn validate_point(p: Point) -> Result<()> {
     valid_coord(p.x)?;
     valid_coord(p.y)
 }
+fn validate_region(region: Region) -> Result<()> {
+    if !region.x.is_finite()
+        || !region.y.is_finite()
+        || !region.width.is_finite()
+        || !region.height.is_finite()
+        || region.x < 0.0
+        || region.y < 0.0
+        || region.width <= 0.0
+        || region.height <= 0.0
+        || region.x + region.width > 1.0
+        || region.y + region.height > 1.0
+    {
+        Err("region must be a positive normalized rectangle within 0..=1".into())
+    } else {
+        Ok(())
+    }
+}
 pub fn validate_condition(c: &Condition, depth: usize) -> Result<()> {
     if depth > MAX_DEPTH {
         return Err("condition nesting is too deep".into());
@@ -138,6 +155,15 @@ pub fn validate_condition(c: &Condition, depth: usize) -> Result<()> {
             } else {
                 Ok(())
             }
+        }
+        Condition::OcrContains { text, region, .. } => {
+            if text.trim().is_empty() || text.len() > 4096 {
+                return Err("OCR condition text must be non-empty and at most 4096 bytes".into());
+            }
+            if let Some(region) = region {
+                validate_region(*region)?;
+            }
+            Ok(())
         }
         Condition::All { conditions } | Condition::Any { conditions } => {
             if conditions.len() > MAX_ITEMS {
@@ -779,6 +805,23 @@ impl<B: Backend> Engine<B> {
                 color_distance(got, *color) <= *tolerance as u32
             }
             Condition::ClipboardContains { text } => self.backend.clipboard()?.contains(text),
+            Condition::OcrContains {
+                text,
+                region,
+                case_sensitive,
+            } => {
+                let boxes = self.backend.ocr(*region)?;
+                let observed = boxes
+                    .iter()
+                    .map(|word| word.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if *case_sensitive {
+                    observed.contains(text)
+                } else {
+                    observed.to_lowercase().contains(&text.to_lowercase())
+                }
+            }
             Condition::All { conditions } => {
                 for c in conditions {
                     if !self.matches(c)? {

@@ -12,3 +12,8 @@ use the framework-owned `rhk_cache` table. Cache values are JSON and expired
 entries are treated as misses and removed. The wrapper uses Turso `0.9.0-pre.5`
 and is synchronous so CLI and Python bindings can call it without owning an
 async runtime.
+
+`Database.fetch` uses the native HTTP `timeout_ms` as its transport budget and
+adds one second to the RPC wait for dispatch, cache, and serialization work. A
+fetch can therefore use the full native timeout even when the `Database`
+client's general RPC timeout is shorter.

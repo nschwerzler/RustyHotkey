@@ -13,6 +13,8 @@ const MAX_FRAMES: usize = 10_000;
 const MAX_OPERATIONS: usize = 10_000;
 const MAX_KEYS: usize = 256;
 const MAX_PIXELS: usize = 10_000;
+const MAX_OCR_BOXES: usize = 10_000;
+const MAX_OCR_TEXT_BYTES: usize = 4096;
 const MAX_TRACE_EVENTS: usize = 100_000;
 const MAX_TRACE_BYTES: usize = 1024 * 1024;
 const MAX_EFFECTS: usize = 10_000;
@@ -51,8 +53,13 @@ pub struct Observation {
     #[serde(default)]
     pub clipboard: String,
     #[serde(default)]
+    pub ocr: Vec<TextBox>,
+    #[serde(default)]
     pub cursor: Point,
 }
+
+/// Backward-compatible descriptive name for a scripted observation frame.
+pub type SimulationObservation = Observation;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -369,16 +376,26 @@ pub fn validate_scenario(scenario: &SimulationScenario) -> Result<()> {
         let observation = &frame.observation;
         total_observation_items = total_observation_items
             .saturating_add(observation.keys_down.len())
-            .saturating_add(observation.pixels.len());
+            .saturating_add(observation.pixels.len())
+            .saturating_add(observation.ocr.len());
         if total_observation_items > MAX_TRACE_EVENTS {
             return Err("scenario observation count exceeds the limit".into());
         }
-        total_observation_bytes =
-            total_observation_bytes.saturating_add(observation.clipboard.len());
+        total_observation_bytes = total_observation_bytes
+            .saturating_add(observation.clipboard.len())
+            .saturating_add(
+                observation
+                    .ocr
+                    .iter()
+                    .fold(0usize, |total, item| total.saturating_add(item.text.len())),
+            );
         if total_observation_bytes > MAX_EFFECT_BYTES {
             return Err("scenario clipboard observations exceed the size limit".into());
         }
-        if observation.keys_down.len() > MAX_KEYS || observation.pixels.len() > MAX_PIXELS {
+        if observation.keys_down.len() > MAX_KEYS
+            || observation.pixels.len() > MAX_PIXELS
+            || observation.ocr.len() > MAX_OCR_BOXES
+        {
             return Err("observation exceeds supported limits".into());
         }
         if observation
@@ -394,6 +411,13 @@ pub fn validate_scenario(scenario: &SimulationScenario) -> Result<()> {
             .any(|p| !valid_point(p.point) || p.color > 0x00ff_ffff)
         {
             return Err("pixel observations require normalized points and RGB colors".into());
+        }
+        if observation.ocr.iter().any(|item| {
+            item.text.is_empty()
+                || item.text.len() > MAX_OCR_TEXT_BYTES
+                || !valid_region(item.region)
+        }) {
+            return Err("OCR observations require bounded text and normalized regions".into());
         }
         for operation in &frame.operations {
             match operation {
@@ -527,6 +551,24 @@ fn valid_point(point: Point) -> bool {
         && point.y.is_finite()
         && (0.0..=1.0).contains(&point.x)
         && (0.0..=1.0).contains(&point.y)
+}
+fn valid_region(region: Region) -> bool {
+    region.x.is_finite()
+        && region.y.is_finite()
+        && region.width.is_finite()
+        && region.height.is_finite()
+        && region.x >= 0.0
+        && region.y >= 0.0
+        && region.width > 0.0
+        && region.height > 0.0
+        && region.x + region.width <= 1.0
+        && region.y + region.height <= 1.0
+}
+fn regions_overlap(left: Region, right: Region) -> bool {
+    left.x < right.x + right.width
+        && right.x < left.x + left.width
+        && left.y < right.y + right.height
+        && right.y < left.y + left.height
 }
 fn event_count(state: &Arc<Mutex<ScriptedState>>) -> Result<usize> {
     Ok(state
@@ -665,8 +707,15 @@ impl Backend for SimulationBackend {
     fn screenshot(&mut self, _region: Option<Region>) -> Result<Capture> {
         Err("screenshot observations are not supported by this simulator".into())
     }
-    fn ocr(&mut self, _region: Option<Region>) -> Result<Vec<TextBox>> {
-        Err("OCR observations are not supported by this simulator".into())
+    fn ocr(&mut self, region: Option<Region>) -> Result<Vec<TextBox>> {
+        let boxes = self.observation()?.ocr;
+        Ok(match region {
+            Some(region) => boxes
+                .into_iter()
+                .filter(|item| regions_overlap(item.region, region))
+                .collect(),
+            None => boxes,
+        })
     }
     fn notify(&mut self, message: &str, ttl_ms: u64) -> Result<()> {
         let mut state = self

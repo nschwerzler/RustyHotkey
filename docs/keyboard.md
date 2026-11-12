@@ -15,10 +15,16 @@ The dialog also contains a collapsible **Scenario what-if simulation** editor.
 Paste a version 1 scenario or load its generic sample, then choose **Run
 what-if**. The editor checks JSON and caps requests at 512 KiB. The authenticated
 `POST /api/simulate` endpoint runs the bounded Rust simulator against its mock
-backend, returns the operation trace and final status, and publishes simulated
-key/button events to this timeline as `sim:scenario`. This does not send
-operating-system input. The CLI and Rust scenario API are documented in
-[simulation.md](simulation.md).
+backend and returns the operation trace and final status. On success, the
+browser starts a playback of that result using its virtual timestamps. The
+timeline marks each frame's focus/target state and each key/button event; Play,
+Pause, Restart, and the speed selector control the playback. Same-time taps get
+a short visual hold, the display is capped at 600 rows, and playback clears all
+simulated held keys/buttons when it finishes. Playback starts automatically
+unless the browser requests reduced motion. Simulation telemetry may also
+appear in the shared feed as `sim:scenario`. Playback only changes this page's
+display and never sends operating-system input. The CLI and Rust scenario API
+are documented in [simulation.md](simulation.md).
 
 ## Script integration
 
@@ -53,6 +59,7 @@ clears its held state. Batches are bounded to 256 entries. This feed is transien
 in memory, never a database of typed text.
 
 Scenario simulation also scripts target presence, focus, pressed keys, pixel
-samples, clipboard text and cursor position between operations. Its result
-summarizes those effects; the Keyboard timeline displays only simulated key and
-button events, while text contents and pointer movement remain omitted.
+samples, clipboard text and cursor position between operations. The scenario
+playback timeline marks frame focus/target state and input events. The shared
+monitor feed displays simulated key/button events; text contents and pointer
+movement remain omitted.

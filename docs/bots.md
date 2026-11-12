@@ -43,8 +43,18 @@ Threads retain at most 64 messages per bot; handoff receipts retain the most
 recent 100. Task state is process-local, while bot configuration, threads and
 handoff receipts use the database cache.
 
+The **Scripts** editor and `list_scripts`/`read_script`/`save_script` tools share
+a file-backed draft workspace under the app data directory. Updates require
+the current revision and saving never executes code. See [scripts.md](scripts.md)
+for the API, syntax checks and bounds.
+
 `POST /api/input-events` is a separate telemetry-only endpoint. All API routes
 require the runtime token and reject invalid Host or Origin values. Provider
 and bot objects returned by the API never contain keys or vault identifiers.
 When the service stops, it closes the input monitor and tool registry and shuts
 down the task pool, cancelling work that has not started.
+
+The default tool registry also provides HTTPS fetch and a tool-owned cache under
+`rhk.tools.<namespace>`. Cache writes and invalidation are guarded as mutating
+tools; fetch has fixed time, response-size, and cache bounds. See
+[tools.md](tools.md) for the tool schemas and limits.

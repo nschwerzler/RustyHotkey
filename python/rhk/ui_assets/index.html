@@ -7,6 +7,7 @@
   <title>RHK BOT</title>
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="keyboard.css">
+  <link rel="stylesheet" href="scripts.css">
 </head>
 <body>
   <div class="app-shell">
@@ -65,12 +66,23 @@
       <section id="simulation-result" class="simulation-result" aria-labelledby="simulation-result-title" hidden>
         <h3 id="simulation-result-title">Simulation result</h3>
         <p id="simulation-result-counts" class="simulation-note"></p>
+        <section id="simulation-playback" class="simulation-playback" aria-labelledby="simulation-playback-title" hidden>
+          <h4 id="simulation-playback-title">Scenario playback</h4>
+          <div class="simulation-playback-controls" role="group" aria-label="Scenario playback controls">
+            <button id="simulation-play-toggle" class="secondary-button" type="button">Play scenario</button>
+            <button id="simulation-play-restart" class="secondary-button" type="button">Restart</button>
+            <label>Speed<select id="simulation-play-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+          </div>
+          <p id="simulation-play-status" class="simulation-play-status" role="status" aria-live="polite">Ready to play the returned trace.</p>
+          <ol id="simulation-play-timeline" class="simulation-play-timeline" aria-label="Scenario virtual-time and focus timeline"></ol>
+        </section>
         <ol id="simulation-steps" class="simulation-steps"></ol>
         <h4>Last state</h4><pre id="simulation-last-state" class="simulation-last-state"></pre>
       </section>
     </details>
   </dialog>
   <script src="app.js"></script>
+  <script src="scripts.js"></script>
   <script src="keyboard.js"></script>
 </body>
 </html>

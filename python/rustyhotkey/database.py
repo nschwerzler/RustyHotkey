@@ -35,7 +35,10 @@ class Database(Client):
                    "allow_http": allow_http}
         if ttl_ms is not None:
             request["cache_ttl_ms"] = ttl_ms
-        return self.request("fetch", request=request)
+        # Native HTTP may run for the full requested timeout. Leave a small
+        # allowance for RPC dispatch, cache work, and JSON serialization.
+        rpc_timeout = max(self.timeout, timeout_ms / 1000 + 1.0)
+        return self.request("fetch", timeout=rpc_timeout, request=request)
 
     def cache_put(self, namespace: str, key: str, value: Any, ttl_ms: int) -> Any:
         return self.request("cache_put", namespace=namespace, key=key, value=value, ttl_ms=ttl_ms)

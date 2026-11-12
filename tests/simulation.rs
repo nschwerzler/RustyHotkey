@@ -113,6 +113,7 @@ fn observation(target_present: bool, focused: bool) -> Observation {
             color: 0x123456,
         }],
         clipboard: "ready".into(),
+        ocr: vec![],
         cursor: Point { x: 0.5, y: 0.5 },
     }
 }
@@ -519,4 +520,102 @@ fn tick_effects_include_simulated_notification_and_sound() {
         serde_json::to_value(&result.rule_effects[0].sounds).unwrap(),
         json!(["info"])
     );
+}
+
+#[test]
+fn ocr_conditions_match_scripted_text_and_filter_by_region() {
+    let mut sample = observation(true, true);
+    sample.ocr = vec![
+        TextBox {
+            text: "Ready to continue".into(),
+            region: Region {
+                x: 0.1,
+                y: 0.2,
+                width: 0.2,
+                height: 0.1,
+            },
+        },
+        TextBox {
+            text: "Other area".into(),
+            region: Region {
+                x: 0.7,
+                y: 0.7,
+                width: 0.2,
+                height: 0.1,
+            },
+        },
+    ];
+    let result = run(scenario(
+        profile(vec![]),
+        vec![frame(
+            0,
+            sample,
+            vec![
+                SimulationOperation::AssertCondition {
+                    condition: Condition::OcrContains {
+                        text: "READY TO".into(),
+                        region: None,
+                        case_sensitive: false,
+                    },
+                    expected: true,
+                },
+                SimulationOperation::AssertCondition {
+                    condition: Condition::OcrContains {
+                        text: "Other".into(),
+                        region: Some(Region {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 0.5,
+                            height: 0.5,
+                        }),
+                        case_sensitive: false,
+                    },
+                    expected: false,
+                },
+                SimulationOperation::AssertCondition {
+                    condition: Condition::OcrContains {
+                        text: "ready".into(),
+                        region: None,
+                        case_sensitive: true,
+                    },
+                    expected: false,
+                },
+            ],
+        )],
+    ))
+    .unwrap();
+    assert!(
+        result.frames[0]
+            .operations
+            .iter()
+            .all(|operation| operation.ok)
+    );
+    assert!(result.events.is_empty());
+}
+
+#[test]
+fn simulation_rejects_unbounded_or_invalid_ocr_observations() {
+    let mut sample = observation(true, true);
+    sample.ocr.push(TextBox {
+        text: "text".into(),
+        region: Region {
+            x: 0.9,
+            y: 0.9,
+            width: 0.2,
+            height: 0.2,
+        },
+    });
+    assert!(validate_scenario(&scenario(profile(vec![]), vec![frame(0, sample, vec![])])).is_err());
+
+    let mut sample = observation(true, true);
+    sample.ocr.push(TextBox {
+        text: "x".repeat(4097),
+        region: Region {
+            x: 0.1,
+            y: 0.1,
+            width: 0.2,
+            height: 0.2,
+        },
+    });
+    assert!(validate_scenario(&scenario(profile(vec![]), vec![frame(0, sample, vec![])])).is_err());
 }

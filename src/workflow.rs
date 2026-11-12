@@ -299,4 +299,54 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn ocr_checkpoints_require_nonempty_text_and_valid_region() {
+        let valid = Condition::OcrContains {
+            text: "ready".into(),
+            region: Some(crate::model::Region {
+                x: 0.1,
+                y: 0.2,
+                width: 0.5,
+                height: 0.4,
+            }),
+            case_sensitive: false,
+        };
+        assert!(
+            validate(&Workflow {
+                schema_version: 1,
+                steps: vec![Step::WaitFor {
+                    condition: valid.clone(),
+                    timeout_ms: 100,
+                    poll_ms: 10
+                }],
+            })
+            .is_ok()
+        );
+        for condition in [
+            Condition::OcrContains {
+                text: "  ".into(),
+                region: None,
+                case_sensitive: false,
+            },
+            Condition::OcrContains {
+                text: "ready".into(),
+                region: Some(crate::model::Region {
+                    x: 0.9,
+                    y: 0.0,
+                    width: 0.2,
+                    height: 0.2,
+                }),
+                case_sensitive: false,
+            },
+        ] {
+            assert!(
+                validate(&Workflow {
+                    schema_version: 1,
+                    steps: vec![Step::Assert { condition }],
+                })
+                .is_err()
+            );
+        }
+    }
 }

@@ -162,14 +162,31 @@ class BotService:
         if not self.registry.has('simulate_profile'):
             self.registry.register('simulate_profile', 'Run a bounded mock scenario and show its input in Keyboard. Never emits OS input.', {'type':'object','properties':{'scenario':{'type':'object'}},'required':['scenario'],'additionalProperties':False}, lambda x: self.simulation_summary(x['scenario']))
         self.tasks: dict[str, dict[str, Any]] = {}; self.lock = threading.Lock(); self.pool = ThreadPoolExecutor(max_workers=4)
+        self.workspace = None
+
+    def configure_workspace(self, root: Path) -> None:
+        from .scripts import ScriptWorkspace
+        if self.workspace is not None: raise BotError('script workspace is already configured')
+        self.workspace = ScriptWorkspace(root)
+        self.registry.register('list_scripts', 'List saved Python, Lua and JSON drafts in this workspace.',
+                               {'type':'object','properties':{},'additionalProperties':False}, lambda _: self.workspace.list_scripts())
+        fields = {'id':{'type':'string'},'extension':{'type':'string','enum':['py','lua','json']}}
+        self.registry.register('read_script', 'Read a saved draft and its revision before proposing edits.',
+                               {'type':'object','properties':fields,'required':['id','extension'],'additionalProperties':False},
+                               lambda x: self.workspace.read_script(x['id'],x['extension']))
+        self.registry.register('save_script', 'Save a draft with syntax and revision checks. Saving never runs code. Omit expected_revision only for a new file.',
+                               {'type':'object','properties':{**fields,'text':{'type':'string'},'expected_revision':{'type':'string'}},
+                                'required':['id','extension','text'],'additionalProperties':False},
+                               lambda x: self.workspace.save_script(x['id'],x['extension'],x['text'],x.get('expected_revision')), mutating=True)
 
     def framework_reference(self) -> dict[str, Any]:
         import inspect
         from .client import Action, Client
         from .database import Database
+        from .scripts import ScriptWorkspace
         def methods(cls):
             return {name: str(inspect.signature(method)) for name, method in inspect.getmembers(cls, callable) if not name.startswith('_')}
-        return {'python': {'Client': methods(Client), 'Action': methods(Action), 'Database': methods(Database)},
+        return {'python': {'Client': methods(Client), 'Action': methods(Action), 'Database': methods(Database), 'ScriptWorkspace': methods(ScriptWorkspace)},
                 'native_schema_command':'rhk tools', 'scenario_cli':'rhk simulate SCENARIO.json',
                 'contracts':['Profiles and workflows are caller-supplied JSON. Native sessions start paused.',
                              'Python customizes stable Rust tools; use a heartbeat for live sessions.',
@@ -301,7 +318,7 @@ def make_handler(service: BotService, token: str):
         def do_GET(self):
             if self.path == "/" or self.path.startswith("/index.html"):
                 raw = _asset("index.html"); self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
-            if self.path in {"/app.js", "/style.css", "/portraits.png", "/keyboard.js", "/keyboard.css"}:
+            if self.path in {"/app.js", "/style.css", "/portraits.png", "/keyboard.js", "/keyboard.css", "/scripts.js", "/scripts.css"}:
                 raw = _asset(self.path[1:]); self.send_response(200); self.send_header("Content-Type", "application/javascript" if self.path.endswith("js") else "text/css" if self.path.endswith("css") else "image/png"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
             if not self._auth(): return
             if urlsplit(self.path).path == "/api/input-events":
@@ -314,6 +331,15 @@ def make_handler(service: BotService, token: str):
             if self.path == "/api/health": self._json({"ok": True, "product": "RHK BOT"}); return
             if self.path == "/api/state": self._json(service.state()); return
             if self.path == "/api/templates": self._json({"templates": service.templates()}); return
+            if self.path == '/api/scripts' or self.path.startswith('/api/scripts/'):
+                try:
+                    if service.workspace is None: raise ValueError('script workspace is unavailable')
+                    if self.path == '/api/scripts': self._json({'scripts':service.workspace.list_scripts()})
+                    else:
+                        name = self.path.removeprefix('/api/scripts/'); script_id, extension = name.rsplit('.',1)
+                        self._json(service.workspace.read_script(script_id,extension))
+                except (ValueError,OSError) as error: self._json({'error':str(error)},400)
+                return
             if self.path.startswith("/api/tasks/"): self._json(service.task(self.path.rsplit("/", 1)[-1])); return
             self.send_error(404)
         def do_POST(self):
@@ -335,6 +361,13 @@ def make_handler(service: BotService, token: str):
                     out = service.run_simulation(data['scenario'])
                 elif self.path == "/api/providers": out = service.provider(data)
                 elif self.path == "/api/bots": out = service.bot(data); out = {"bot": out, **out}
+                elif self.path == '/api/scripts':
+                    if service.workspace is None: raise ValueError('script workspace is unavailable')
+                    if not isinstance(data,dict) or set(data) - {'id','extension','text','expected_revision'} or not {'id','extension','text'} <= set(data):
+                        raise ValueError('id, extension and text are required')
+                    from .scripts import ScriptConflict
+                    try: out = service.workspace.save_script(data['id'],data['extension'],data['text'],data.get('expected_revision'))
+                    except ScriptConflict as error: self._json({'error':str(error)},409); return
                 elif self.path == "/api/chat": out = {"task_id": service.chat(data.get("bot_id", ""), data.get("message", ""))}
                 else: self.send_error(404); return
                 self._json(out, 201)
@@ -375,6 +408,7 @@ def serve(data_dir: Path, port: int = 0, no_open: bool = False, service_factory:
     db = Database(database_path or (data_dir / "rustyhotkey.db")); vault = CredentialVault() if os.name == "nt" else MemoryVault(); token = secrets.token_urlsafe(32)
     registry = registry_factory(db) if registry_factory else default_registry(db)
     service = service_factory(db, vault, registry) if service_factory else BotService(CacheStore(db), vault, registry=registry)
+    service.configure_workspace(data_dir / 'scripts')
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(service, token)); url = f"http://127.0.0.1:{server.server_port}/#token={token}"
     registry_file.write_text(json.dumps({"pid": os.getpid(), "port": server.server_port, "url": url, "token": token}), encoding="utf-8")
     if not no_open and not webbrowser.open(url): print(f"RHK BOT: open {url}", file=sys.stderr)

@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HELP: &str = "RHK — RustyHotkey (Windows x64)\n\nCommands:\n  rhk help | capabilities | tools\n  rhk validate profile|workflow|recording|simulation FILE\n  rhk preview WORKFLOW\n  rhk simulate SCENARIO.json\n  rhk run|rpc PROFILE [--script PATH] [--no-tray] [--observe-only]\n  rhk overlay PROFILE WIDGET.lua [WIDGET.lua...]\n  rhk ui [--no-open] [--port PORT] [--data-dir PATH]\n  rhk tray [--script PATH --engine-pid PID]\n  rhk fetch URL [--database PATH] [--ttl-ms N] [--allow-http]\n  rhk record PROFILE OUTPUT [--include-text]\n  rhk replay PROFILE RECORDING [SPEED]\n  rhk db DATABASE\n\nProfiles and runtime data are caller supplied. run starts paused; the configured\nphysical resume key arms the engine. rpc uses newline-delimited JSON requests.\nSee docs/usage.md, docs/python.md and llms.txt for the API contract.";
+const HELP: &str = "RHK — RustyHotkey (Windows x64)\n\nCommands:\n  rhk help | capabilities | tools\n  rhk validate profile|workflow|recording|simulation FILE\n  rhk preview WORKFLOW\n  rhk simulate SCENARIO.json\n  rhk run|rpc PROFILE [--script PATH] [--no-tray] [--observe-only]\n  rhk overlay PROFILE WIDGET.lua [WIDGET.lua...]\n  rhk scripts [--root PATH] list|read|save ...\n  rhk ui [--no-open] [--port PORT] [--data-dir PATH]\n  rhk tray [--script PATH --engine-pid PID]\n  rhk fetch URL [--database PATH] [--ttl-ms N] [--allow-http]\n  rhk record PROFILE OUTPUT [--include-text]\n  rhk replay PROFILE RECORDING [SPEED]\n  rhk db DATABASE\n\nProfiles and runtime data are caller supplied. run starts paused; the configured\nphysical resume key arms the engine. rpc uses newline-delimited JSON requests.\nSee docs/usage.md, docs/python.md and llms.txt for the API contract.";
 
 pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let args: Vec<_> = args.collect();
@@ -122,7 +122,8 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
         "db" => database_rpc(Path::new(arg(&args, 1, "database")?)),
         "fetch" => fetch_command(&args),
         "tools" => output(&tool_catalog()),
-        "ui" => ui_command(&args),
+        "ui" => python_command(&args, "rustyhotkey.bot_server"),
+        "scripts" => python_command(&args, "rustyhotkey.script_cli"),
         "tray" => {
             if let Some(script) = option(&args, "--script")? {
                 let pid = option(&args, "--engine-pid")?
@@ -571,10 +572,10 @@ fn spawn_tray(script: &str) -> Result<()> {
         .map_err(|e| format!("start script tray: {e}"))?;
     Ok(())
 }
-fn ui_command(args: &[String]) -> Result<()> {
+fn python_command(args: &[String], module: &str) -> Result<()> {
     let python = std::env::var_os("RHK_PYTHON").unwrap_or_else(|| "python".into());
     let mut command = Command::new(python);
-    command.args(["-m", "rustyhotkey.bot_server"]);
+    command.args(["-B", "-m", module]);
     command.args(&args[1..]);
     if let Some(path) = std::env::var_os("RHK_PYTHON_PATH") {
         command.env("PYTHONPATH", path);
@@ -595,11 +596,11 @@ fn ui_command(args: &[String]) -> Result<()> {
     }
     let status = command
         .status()
-        .map_err(|e| format!("start Python UI: {e}"))?;
+        .map_err(|e| format!("start Python interface: {e}"))?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("Python UI exited with {status}"))
+        Err(format!("Python interface exited with {status}"))
     }
 }
 fn fetch_command(args: &[String]) -> Result<()> {

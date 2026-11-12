@@ -118,7 +118,7 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     fn server(response: &'static str) -> (String, thread::JoinHandle<()>) {
@@ -129,6 +129,18 @@ mod tests {
             let mut request = [0; 2048];
             let _ = stream.read(&mut request).unwrap();
             stream.write_all(response.as_bytes()).unwrap();
+        });
+        (url, worker)
+    }
+    fn delayed_server(delay: Duration, response: &'static str) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            let _ = stream.read(&mut request).unwrap();
+            thread::sleep(delay);
+            let _ = stream.write_all(response.as_bytes());
         });
         (url, worker)
     }
@@ -165,6 +177,61 @@ mod tests {
         assert!(fetch(&req, None).is_err());
     }
     #[test]
+    fn total_deadline_covers_stalled_response_headers() {
+        let (warmup_url, warmup_worker) =
+            server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        fetch(&request(warmup_url), None).unwrap();
+        warmup_worker.join().unwrap();
+        let (url, worker) = delayed_server(
+            Duration::from_millis(250),
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
+        );
+        let mut req = request(url);
+        req.timeout_ms = 80;
+        let started = Instant::now();
+        let error = fetch(&req, None).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "elapsed: {:?}",
+            started.elapsed()
+        );
+        worker.join().unwrap();
+    }
+    #[test]
+    fn total_deadline_covers_a_trickled_response_body() {
+        let (warmup_url, warmup_worker) =
+            server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        fetch(&request(warmup_url), None).unwrap();
+        warmup_worker.join().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\na")
+                .unwrap();
+            stream.flush().unwrap();
+            thread::sleep(Duration::from_millis(70));
+            let _ = stream.write_all(b"b");
+            let _ = stream.flush();
+            thread::sleep(Duration::from_millis(70));
+            let _ = stream.write_all(b"c");
+            let _ = stream.flush();
+            thread::sleep(Duration::from_millis(70));
+            let _ = stream.write_all(b"d");
+        });
+        let mut req = request(url);
+        req.timeout_ms = 120;
+        let started = Instant::now();
+        let error = fetch(&req, None).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < Duration::from_millis(200));
+        worker.join().unwrap();
+    }
+    #[test]
     fn cache_hits_expire_and_respect_limits() {
         let path = std::env::temp_dir().join(format!("rhk-web-test-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
@@ -192,9 +259,17 @@ mod tests {
 #[cfg(windows)]
 mod native {
     use super::*;
-    use std::{ffi::c_void, ptr};
+    use std::{
+        ffi::c_void,
+        ptr,
+        sync::{Arc, mpsc},
+        time::{Duration, Instant},
+    };
     use windows::{
-        Win32::Networking::WinHttp::*,
+        Win32::{
+            Foundation::{GetLastError, SetLastError, WIN32_ERROR},
+            Networking::WinHttp::*,
+        },
         core::{PCWSTR, w},
     };
 
@@ -210,8 +285,21 @@ mod native {
     }
     impl Drop for Handle {
         fn drop(&mut self) {
-            unsafe {
-                let _ = WinHttpCloseHandle(self.0);
+            if !self.0.is_null() {
+                unsafe {
+                    let _ = WinHttpCloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    impl Handle {
+        fn close(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    let _ = WinHttpCloseHandle(self.0);
+                }
+                self.0 = ptr::null_mut();
             }
         }
     }
@@ -279,6 +367,126 @@ mod native {
         parse(request).map(|_| ())
     }
 
+    enum AsyncEvent {
+        SendComplete,
+        HeadersAvailable,
+        ReadComplete(usize),
+        RequestError(u32),
+        Closing,
+    }
+
+    #[derive(Clone, Copy)]
+    enum AsyncKind {
+        Send,
+        Headers,
+        Read,
+    }
+
+    struct CallbackState {
+        sender: mpsc::Sender<AsyncEvent>,
+        read_buffer: std::sync::Mutex<[u8; 8192]>,
+        parent_handles: std::sync::Mutex<Option<(usize, usize)>>,
+    }
+
+    unsafe extern "system" fn status_callback(
+        _: *mut c_void,
+        context: usize,
+        status: u32,
+        information: *mut c_void,
+        information_len: u32,
+    ) {
+        if context == 0 {
+            return;
+        }
+        let pointer = context as *const CallbackState;
+        unsafe { Arc::increment_strong_count(pointer) };
+        let state = unsafe { Arc::from_raw(pointer) };
+        let event = match status {
+            WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE => Some(AsyncEvent::SendComplete),
+            WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE => Some(AsyncEvent::HeadersAvailable),
+            WINHTTP_CALLBACK_STATUS_READ_COMPLETE => {
+                Some(AsyncEvent::ReadComplete(information_len as usize))
+            }
+            WINHTTP_CALLBACK_STATUS_REQUEST_ERROR if !information.is_null() => {
+                let result = unsafe { &*(information as *const WINHTTP_ASYNC_RESULT) };
+                Some(AsyncEvent::RequestError(result.dwError))
+            }
+            WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING => Some(AsyncEvent::Closing),
+            _ => None,
+        };
+        if let Some(event) = event {
+            let closing = matches!(event, AsyncEvent::Closing);
+            if closing {
+                if let Some((connection, session)) = state.parent_handles.lock().unwrap().take() {
+                    unsafe {
+                        let _ = WinHttpCloseHandle(connection as *mut c_void);
+                        let _ = WinHttpCloseHandle(session as *mut c_void);
+                    }
+                }
+            }
+            let _ = state.sender.send(event);
+            drop(state);
+            if closing {
+                drop(unsafe { Arc::from_raw(pointer) });
+            }
+        }
+    }
+
+    struct AsyncRequest {
+        handle: Handle,
+        events: mpsc::Receiver<AsyncEvent>,
+        callback_state: Arc<CallbackState>,
+    }
+
+    impl AsyncRequest {
+        fn wait_for(
+            &self,
+            expected: AsyncKind,
+            deadline: Instant,
+            timeout_ms: u64,
+        ) -> crate::Result<AsyncEvent> {
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(format!("HTTP request timed out after {timeout_ms} ms"));
+                }
+                let event = self
+                    .events
+                    .recv_timeout(remaining)
+                    .map_err(|_| format!("HTTP request timed out after {timeout_ms} ms"))?;
+                if Instant::now() >= deadline {
+                    return Err(format!("HTTP request timed out after {timeout_ms} ms"));
+                }
+                match event {
+                    AsyncEvent::RequestError(code) => {
+                        return Err(format!("WinHTTP request failed with error {code}"));
+                    }
+                    AsyncEvent::Closing => return Err("HTTP request was closed".into()),
+                    AsyncEvent::SendComplete if matches!(expected, AsyncKind::Send) => {
+                        return Ok(AsyncEvent::SendComplete);
+                    }
+                    AsyncEvent::HeadersAvailable if matches!(expected, AsyncKind::Headers) => {
+                        return Ok(AsyncEvent::HeadersAvailable);
+                    }
+                    event @ AsyncEvent::ReadComplete(_) if matches!(expected, AsyncKind::Read) => {
+                        return Ok(event);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    impl Drop for AsyncRequest {
+        fn drop(&mut self) {
+            // In async WinHTTP mode closing the request cancels its pending
+            // operation. The callback-owned Arc keeps its read buffer and
+            // channel state alive until HANDLE_CLOSING arrives, so cleanup
+            // never waits past the caller's total deadline.
+            self.handle.close();
+        }
+    }
+
     fn header(handle: &Handle, kind: u32) -> Option<String> {
         let mut len = 0u32;
         let mut index = 0u32;
@@ -306,19 +514,31 @@ mod native {
         }
         String::from_utf16(&buf).ok()
     }
+
+    fn accept_async_start(result: windows::core::Result<()>) -> crate::Result<()> {
+        match result {
+            Ok(()) => Ok(()),
+            // WinHTTP uses ERROR_IO_PENDING to report an accepted asynchronous
+            // operation; its completion or failure arrives through the callback.
+            Err(error) if error.code().0 as u32 == 0x8007_03E5 => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     pub fn fetch(request: &FetchRequest) -> crate::Result<FetchResponse> {
         let p = parse(request)?;
+        let deadline = Instant::now() + Duration::from_millis(request.timeout_ms);
         unsafe {
-            let session = Handle::new(WinHttpOpen(
+            let mut session = Handle::new(WinHttpOpen(
                 w!("RustyHotkey/1"),
                 WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                 PCWSTR::null(),
                 PCWSTR::null(),
-                0,
+                WINHTTP_FLAG_ASYNC,
             ))?;
-            let t = request.timeout_ms as i32;
+            let t = request.timeout_ms.min(i32::MAX as u64) as i32;
             WinHttpSetTimeouts(session.0, t, t, t, t).map_err(|e| e.to_string())?;
-            let connection = Handle::new(WinHttpConnect(
+            let mut connection = Handle::new(WinHttpConnect(
                 session.0,
                 PCWSTR(p.host.as_ptr()),
                 p.port,
@@ -338,23 +558,83 @@ mod native {
                 ptr::null(),
                 flags,
             ))?;
+            let (sender, events) = mpsc::channel();
+            let callback_state = Arc::new(CallbackState {
+                sender,
+                read_buffer: std::sync::Mutex::new([0; 8192]),
+                parent_handles: std::sync::Mutex::new(None),
+            });
+            let callback_context = Arc::as_ptr(&callback_state) as usize;
+            SetLastError(WIN32_ERROR(0));
+            let _previous_callback = WinHttpSetStatusCallback(
+                handle.0,
+                Some(status_callback),
+                WINHTTP_CALLBACK_FLAG_ALL_NOTIFICATIONS,
+                0,
+            );
+            let callback_error = GetLastError();
+            if callback_error.0 != 0 {
+                return Err(format!(
+                    "could not register WinHTTP callback: {}",
+                    std::io::Error::from_raw_os_error(callback_error.0 as i32)
+                ));
+            }
+            let context_bytes = callback_context.to_ne_bytes();
+            WinHttpSetOption(
+                Some(handle.0),
+                WINHTTP_OPTION_CONTEXT_VALUE,
+                Some(&context_bytes),
+            )
+            .map_err(|e| e.to_string())?;
+            // The callback owns this reference until HANDLE_CLOSING.
+            let _ = Arc::into_raw(callback_state.clone());
+            *callback_state.parent_handles.lock().unwrap() =
+                Some((connection.0 as usize, session.0 as usize));
+            connection.0 = ptr::null_mut();
+            session.0 = ptr::null_mut();
+            let handle = AsyncRequest {
+                handle,
+                events,
+                callback_state,
+            };
             let disabled = (WINHTTP_DISABLE_COOKIES
                 | WINHTTP_DISABLE_REDIRECTS
                 | WINHTTP_DISABLE_AUTHENTICATION)
                 .to_ne_bytes();
             WinHttpSetOption(
-                Some(handle.0),
+                Some(handle.handle.0),
                 WINHTTP_OPTION_DISABLE_FEATURE,
                 Some(&disabled),
             )
             .map_err(|e| e.to_string())?;
-            WinHttpSendRequest(handle.0, None, None, 0, 0, 0).map_err(|e| e.to_string())?;
-            WinHttpReceiveResponse(handle.0, ptr::null_mut()).map_err(|e| e.to_string())?;
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "HTTP request timed out after {} ms",
+                    request.timeout_ms
+                ));
+            }
+            accept_async_start(WinHttpSendRequest(
+                handle.handle.0,
+                None,
+                None,
+                0,
+                0,
+                callback_context,
+            ))?;
+            handle.wait_for(AsyncKind::Send, deadline, request.timeout_ms)?;
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "HTTP request timed out after {} ms",
+                    request.timeout_ms
+                ));
+            }
+            accept_async_start(WinHttpReceiveResponse(handle.handle.0, ptr::null_mut()))?;
+            handle.wait_for(AsyncKind::Headers, deadline, request.timeout_ms)?;
             let mut status = 0u32;
             let mut len = 4u32;
             let mut index = 0u32;
             WinHttpQueryHeaders(
-                handle.0,
+                handle.handle.0,
                 WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                 PCWSTR::null(),
                 Some((&mut status as *mut u32).cast()),
@@ -365,21 +645,30 @@ mod native {
             if (300..400).contains(&status) {
                 return Err(format!(
                     "HTTP redirect {status} refused; location: {}",
-                    header(&handle, WINHTTP_QUERY_LOCATION).unwrap_or_default()
+                    header(&handle.handle, WINHTTP_QUERY_LOCATION).unwrap_or_default()
                 ));
             }
-            let content_type = header(&handle, WINHTTP_QUERY_CONTENT_TYPE);
+            let content_type = header(&handle.handle, WINHTTP_QUERY_CONTENT_TYPE);
             let mut body = Vec::new();
             loop {
-                let mut buffer = [0u8; 8192];
-                let mut read = 0u32;
-                WinHttpReadData(
-                    handle.0,
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "HTTP request timed out after {} ms",
+                        request.timeout_ms
+                    ));
+                }
+                let mut buffer = handle.callback_state.read_buffer.lock().unwrap();
+                accept_async_start(WinHttpReadData(
+                    handle.handle.0,
                     buffer.as_mut_ptr().cast(),
                     buffer.len() as u32,
-                    &mut read,
-                )
-                .map_err(|e| e.to_string())?;
+                    ptr::null_mut(),
+                ))?;
+                let AsyncEvent::ReadComplete(read) =
+                    handle.wait_for(AsyncKind::Read, deadline, request.timeout_ms)?
+                else {
+                    unreachable!();
+                };
                 if read == 0 {
                     break;
                 }

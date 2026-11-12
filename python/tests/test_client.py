@@ -110,5 +110,15 @@ class ClientTests(unittest.TestCase):
                           max_bytes=200, ttl_ms=1000)
         self.assertEqual(result["op"], "fetch")
 
+  def test_database_fetch_rpc_timeout_covers_native_fetch_budget(self):
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as d:
+      db = Database(Path(d) / "state.db", timeout=5)
+      with patch.object(db, "request", return_value={}) as request:
+        db.fetch("https://example.invalid/data")
+        self.assertEqual(request.call_args.kwargs["timeout"], 11.0)
+        db.fetch("https://example.invalid/data", timeout_ms=60_000)
+        self.assertEqual(request.call_args.kwargs["timeout"], 61.0)
+
 
 if __name__ == "__main__": unittest.main()

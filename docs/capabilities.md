@@ -21,6 +21,7 @@ than controlling a user's application.
 | Tray | per-script icon, independent pause/edit/exit/hotkeys controls, dormant/running colors | started by `run`/`rpc`; `--no-tray` disables it; `rhk tray` provides global controls |
 | Bot workspace | loopback UI, `framework_reference` and `simulate_profile` tools, bounded handoffs, provider adapters, vault-backed keys | implemented in Python package; see [bots.md](bots.md) |
 | Input monitor | keyboard/mouse graphic, successful native output, simulated actions and scenarios, optional focused-page capture | bounded memory-only telemetry; see [keyboard.md](keyboard.md) |
+| Script workspace | Python/Lua/JSON draft editor, revision checks, CLI and bot tools | saves never execute drafts; see [scripts.md](scripts.md) |
 
 No capability implies a default target, default HUD, private profile, macro, calibration, or game-specific behavior. Do not claim a native/live check passed unless you ran it on the relevant Windows setup; repository tests and dry runs do not prove live input safety.
 

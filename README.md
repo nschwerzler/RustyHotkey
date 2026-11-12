@@ -18,6 +18,10 @@ operating-system input. Live `run` and `rpc` sessions also support
 input-producing operations. See [scenario simulation](docs/simulation.md),
 [API contracts](docs/api.md), and [capabilities](docs/capabilities.md).
 
+RHK BOT includes a [script workspace](docs/scripts.md) for Python, Lua and JSON
+drafts. Edit them in the app or through typed bot tools; syntax and revision
+checks protect saved drafts, and saving never starts automation.
+
 ## Build and check
 
 Install stable Rust with the Windows MSVC toolchain and the Visual Studio C++

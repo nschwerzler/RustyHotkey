@@ -118,6 +118,13 @@ pub enum Condition {
     ClipboardContains {
         text: String,
     },
+    OcrContains {
+        text: String,
+        #[serde(default)]
+        region: Option<Region>,
+        #[serde(default)]
+        case_sensitive: bool,
+    },
     All {
         conditions: Vec<Condition>,
     },
