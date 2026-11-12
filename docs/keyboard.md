@@ -28,6 +28,13 @@ are documented in [simulation.md](simulation.md).
 
 ## Script integration
 
+Python scripts launched through the app's **Run saved Python** action attach
+their RHK clients automatically. Each run has a separate live source. Closing
+a client or finishing a managed run clears that source's displayed held keys.
+The authenticated loopback bridge carries bounded key/button events only;
+it does not install a global keyboard hook or forward typed text. Standalone
+CLI runs can use the explicit integration below in an embedding application.
+
 Embedding applications share the bot service's `input_monitor` with their
 script clients:
 

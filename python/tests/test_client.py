@@ -47,6 +47,23 @@ class ClientTests(unittest.TestCase):
       with self.assertRaisesRegex(Exception, "rejected"): c.request("bad")
       c.close(); self.assertIsNone(c._process)
 
+  def test_close_pauses_native_client_before_stopping_telemetry(self):
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as d:
+      c = client(Path(d), heartbeat_interval=None)
+      c.start()
+      order = []
+      original_request = c.request
+      class Telemetry:
+        def stop(self): order.append("telemetry.stop")
+      c._script_telemetry = Telemetry()
+      def request(op, **kwargs):
+        order.append(f"native.{op}")
+        return original_request(op, **kwargs)
+      with patch.object(c, "request", side_effect=request):
+        c.close()
+      self.assertLess(order.index("native.pause"), order.index("telemetry.stop"))
+
 
   def test_concurrent_requests_are_matched(self):
     with tempfile.TemporaryDirectory() as d, client(Path(d)) as c:

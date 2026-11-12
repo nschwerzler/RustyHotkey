@@ -164,6 +164,32 @@ class BotService:
         self.tasks: dict[str, dict[str, Any]] = {}; self.lock = threading.Lock(); self.pool = ThreadPoolExecutor(max_workers=4)
         self.workspace = None
         self.script_runner = None
+        self._ended_script_runs: set[str] = set()
+
+    @staticmethod
+    def _script_input_source(run: dict[str, Any]) -> str:
+        return f"live:script:{run['script_id'][:12]}:{run['id']}"
+
+    def script_runs(self) -> list[dict[str, Any]]:
+        if self.script_runner is None: raise ValueError('script workspace is unavailable')
+        runs = self.script_runner.list_runs()
+        with self.lock:
+            self._ended_script_runs.intersection_update(run['id'] for run in runs)
+            for run in runs:
+                if run['state'] not in {'running','stopping'} and run['id'] not in self._ended_script_runs:
+                    self.input_monitor.publish(self._script_input_source(run),[{'kind':'reset'}])
+                    self._ended_script_runs.add(run['id'])
+        return runs
+
+    def script_input(self, data: Any) -> dict[str, Any]:
+        if self.script_runner is None: raise ValueError('script workspace is unavailable')
+        if not isinstance(data,dict) or set(data) != {'run_id','events'}: raise ValueError('run_id and events are required')
+        run = self.script_runner.status(data['run_id'])
+        if run['state'] not in {'running','stopping'}:
+            self.input_monitor.publish(self._script_input_source(run),[{'kind':'reset'}])
+            raise ValueError('script run is no longer active')
+        self.input_monitor.publish(self._script_input_source(run),data['events'])
+        return {'accepted':len(data['events'])}
 
     def configure_workspace(self, root: Path) -> None:
         from .scripts import ScriptWorkspace
@@ -329,6 +355,7 @@ def make_handler(service: BotService, token: str):
                 from urllib.parse import parse_qs
                 try:
                     after = int(parse_qs(urlsplit(self.path).query).get('after', ['0'])[0])
+                    if service.script_runner is not None: service.script_runs()
                     self._json(service.input_monitor.snapshot(after))
                 except ValueError as e: self._json({'error': str(e)}, 400)
                 return
@@ -337,7 +364,7 @@ def make_handler(service: BotService, token: str):
             if self.path == "/api/templates": self._json({"templates": service.templates()}); return
             if self.path == '/api/script-runs':
                 if service.script_runner is None: self._json({'error':'script workspace is unavailable'},400); return
-                self._json({'runs':service.script_runner.list_runs()}); return
+                self._json({'runs':service.script_runs()}); return
             if self.path == '/api/scripts' or self.path.startswith('/api/scripts/'):
                 try:
                     if service.workspace is None: raise ValueError('script workspace is unavailable')
@@ -374,11 +401,13 @@ def make_handler(service: BotService, token: str):
                     from .scripts import ScriptConflict
                     try: out = service.script_runner.run(data['id'],data['expected_revision'])
                     except ScriptConflict as error: self._json({'error':str(error)},409); return
+                elif self.path == '/api/script-input-events': out = service.script_input(data)
                 elif self.path.startswith('/api/script-runs/') and self.path.endswith('/stop'):
                     if service.script_runner is None: raise ValueError('script workspace is unavailable')
                     if data != {}: raise ValueError('stop takes an empty object')
                     run_id = self.path.removeprefix('/api/script-runs/').removesuffix('/stop')
                     out = service.script_runner.stop(run_id)
+                    service.input_monitor.publish(service._script_input_source(out),[{'kind':'reset'}])
                 elif self.path == '/api/scripts':
                     if service.workspace is None: raise ValueError('script workspace is unavailable')
                     if not isinstance(data,dict) or set(data) - {'id','extension','text','expected_revision'} or not {'id','extension','text'} <= set(data):
@@ -428,6 +457,7 @@ def serve(data_dir: Path, port: int = 0, no_open: bool = False, service_factory:
     service = service_factory(db, vault, registry) if service_factory else BotService(CacheStore(db), vault, registry=registry)
     service.configure_workspace(data_dir / 'scripts')
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(service, token)); url = f"http://127.0.0.1:{server.server_port}/#token={token}"
+    service.script_runner.set_telemetry(f'http://127.0.0.1:{server.server_port}/api/script-input-events',token)
     registry_file.write_text(json.dumps({"pid": os.getpid(), "port": server.server_port, "url": url, "token": token}), encoding="utf-8")
     if not no_open and not webbrowser.open(url): print(f"RHK BOT: open {url}", file=sys.stderr)
     try: server.serve_forever()

@@ -127,6 +127,7 @@ class Client:
             self.command.append("--observe-only")
         self.timeout = timeout
         self.close_timeout = close_timeout
+        self.mode = mode
         self._process: subprocess.Popen[str] | None = None
         self._responses: dict[str, queue.Queue[dict[str, Any]]] = {}
         self._lock = threading.Lock()
@@ -142,6 +143,8 @@ class Client:
         self._stderr_tail: queue.Queue[str] = queue.Queue(maxsize=32)
         self.heartbeat_interval = heartbeat_interval
         self.close_op = close_op
+        self._script_telemetry: Any = None
+        self._script_telemetry_checked = False
 
     def __enter__(self) -> "Client":
         self.start()
@@ -154,6 +157,14 @@ class Client:
         with self._start_lock:
             if self._closed: raise RustyHotkeyError("client is closed")
             self._start_process()
+            if not self._script_telemetry_checked:
+                self._script_telemetry_checked = True
+                if self.mode == "rpc":
+                    try:
+                        from .script_telemetry import attach
+                        self._script_telemetry = attach(self)
+                    except Exception:
+                        self._script_telemetry = None
 
     def _start_process(self) -> None:
         if self._process is not None:
@@ -253,10 +264,16 @@ class Client:
 
     def close(self) -> None:
         if self._process is None or self._closed: return
+        telemetry = self._script_telemetry
+        self._script_telemetry = None
         if self._heartbeat_stop: self._heartbeat_stop.set()
         if self.close_op is not None:
             try: self.request(self.close_op, timeout=self.close_timeout)
             except (RustyHotkeyError, OSError): pass
+        # Release native owned input before waiting for display telemetry.
+        if telemetry is not None:
+            try: telemetry.stop()
+            except Exception: pass
         self._closed = True
         process = self._process
         try:

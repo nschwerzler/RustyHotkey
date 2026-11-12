@@ -58,3 +58,10 @@ Receipts contain `id`, `script_id`, `revision`, `state` (`running`, `stopping`,
 stderr, capped at 64 KiB total; excess output is drained and discarded. The
 runner never arms RHK or sends input. If a script uses RHK input APIs, those
 APIs retain their own target, heartbeat, cancellation, and cleanup rules.
+
+Runs started by RHK BOT automatically forward successful native key and mouse
+button edges from their RHK clients to the Keyboard panel. The child receives
+a run identifier and an authenticated loopback telemetry endpoint through its
+environment. Text contents, pointer positions and screenshots are excluded.
+This display bridge never emits input; failure to display events does not
+change the script's execution. Finished runs clear their displayed held keys.

@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .scripts import ScriptConflict, ScriptWorkspace, ScriptWorkspaceError
 
@@ -65,6 +66,21 @@ class ScriptRunner:
         self._lock = threading.RLock()
         self._runs: dict[str, _Run] = {}
         self._closed = False
+        self._telemetry: tuple[str,str] | None = None
+
+    def set_telemetry(self, url: str, token: str) -> None:
+        if not isinstance(url,str) or len(url) > 128 or any(ord(ch) <= 32 or ord(ch) == 127 for ch in url):
+            raise ScriptRunnerError('telemetry requires the local application endpoint')
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except ValueError as error:
+            raise ScriptRunnerError('telemetry requires the local application endpoint') from error
+        if parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or not port or parsed.netloc != f'127.0.0.1:{port}' or parsed.path != '/api/script-input-events' or parsed.query or parsed.fragment:
+            raise ScriptRunnerError('telemetry requires the local application endpoint')
+        if not isinstance(token,str) or not 1 <= len(token) <= 256 or any(ord(ch) < 33 or ord(ch) > 126 for ch in token):
+            raise ScriptRunnerError('telemetry token is invalid')
+        with self._lock: self._telemetry = (url,token)
 
     def run(self, script_id: str, expected_revision: str) -> dict[str, Any]:
         """Start one exact Python draft revision and return its run receipt."""
@@ -101,6 +117,10 @@ class ScriptRunner:
                 child_env = os.environ.copy()
                 child_env["RHK_SCRIPT_PATH"] = str(self.workspace.root / f"{script_id}.py")
                 child_env["RHK_SCRIPT_REVISION"] = expected_revision
+                child_env['RHK_SCRIPT_RUN_ID'] = run_id
+                child_env.pop('RHK_TELEMETRY_URL',None); child_env.pop('RHK_TELEMETRY_TOKEN',None)
+                if self._telemetry is not None:
+                    child_env['RHK_TELEMETRY_URL'],child_env['RHK_TELEMETRY_TOKEN'] = self._telemetry
                 child_env["RHK_PYTHON"] = sys.executable
                 child_env["PYTHONIOENCODING"] = "utf-8"
                 existing_pythonpath = child_env.get("PYTHONPATH", "")
