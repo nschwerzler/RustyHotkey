@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HELP: &str = "RHK — RustyHotkey (Windows x64)\n\nCommands:\n  rhk help | capabilities | tools\n  rhk validate profile|workflow|recording|simulation FILE\n  rhk preview WORKFLOW\n  rhk simulate SCENARIO.json\n  rhk run|rpc PROFILE [--script PATH] [--no-tray] [--observe-only]\n  rhk overlay PROFILE WIDGET.lua [WIDGET.lua...]\n  rhk scripts [--root PATH] list|read|save ...\n  rhk ui [--no-open] [--port PORT] [--data-dir PATH]\n  rhk tray [--script PATH --engine-pid PID]\n  rhk fetch URL [--database PATH] [--ttl-ms N] [--allow-http]\n  rhk record PROFILE OUTPUT [--include-text]\n  rhk replay PROFILE RECORDING [SPEED]\n  rhk db DATABASE\n\nProfiles and runtime data are caller supplied. run starts paused; the configured\nphysical resume key arms the engine. rpc uses newline-delimited JSON requests.\nSee docs/usage.md, docs/python.md and llms.txt for the API contract.";
+const HELP: &str = "RHK — RustyHotkey (Windows x64)\n\nCommands:\n  rhk help | capabilities | tools\n  rhk validate profile|workflow|recording|simulation FILE\n  rhk preview WORKFLOW\n  rhk simulate SCENARIO.json\n  rhk mock-rpc PROFILE [OBSERVATION.json]\n  rhk run|rpc PROFILE [--script PATH] [--no-tray] [--observe-only]\n  rhk overlay PROFILE WIDGET.lua [WIDGET.lua...]\n  rhk scripts [--root PATH] list|read|save ...\n  rhk ui [--no-open] [--port PORT] [--data-dir PATH]\n  rhk tray [--script PATH --engine-pid PID]\n  rhk fetch URL [--database PATH] [--ttl-ms N] [--allow-http]\n  rhk record PROFILE OUTPUT [--include-text]\n  rhk replay PROFILE RECORDING [SPEED]\n  rhk db DATABASE\n\nProfiles and runtime data are caller supplied. run starts paused; the configured\nphysical resume key arms the engine. rpc uses newline-delimited JSON requests.\nSee docs/usage.md, docs/python.md and llms.txt for the API contract.";
 
 pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let args: Vec<_> = args.collect();
@@ -70,6 +70,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
             let value = serde_json::to_value(result?).map_err(|e| e.to_string())?;
             output(&value)
         }
+        "mock-rpc" => mock_rpc(&args),
         "rpc" | "run" => {
             let path = arg(&args, 1, "profile")?;
             let profile: Profile = read_json(path)?;
@@ -182,6 +183,126 @@ fn state_dir() -> Result<PathBuf> {
         .or_else(|| std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("RustyHotkey")))
         .ok_or("set RHK_DATA_DIR or APPDATA")?;
     Ok(root)
+}
+
+fn render_mock_widgets(
+    widgets: &mut crate::lua::WidgetManager,
+    state: &Value,
+    status: Value,
+) -> Value {
+    let rendered = widgets.render(&json!({"engine":status,"state":state}));
+    let diagnostics: Vec<_> = rendered
+        .diagnostics
+        .iter()
+        .map(|item| json!({"path":item.path,"message":item.message}))
+        .collect();
+    json!({"simulated":true,"spec":rendered.spec,"diagnostics":diagnostics})
+}
+
+fn mock_rpc(args: &[String]) -> Result<()> {
+    let profile: Profile = read_json(arg(args, 1, "profile")?)?;
+    let observation = if let Some(path) = args.get(2) {
+        read_json(path)?
+    } else {
+        crate::simulation::Observation {
+            target_present: true,
+            focused: true,
+            keys_down: Vec::new(),
+            pixels: Vec::new(),
+            clipboard: String::new(),
+            ocr: Vec::new(),
+            cursor: Point { x: 0.5, y: 0.5 },
+            screenshot: None,
+        }
+    };
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let dir = state_dir()?
+        .join("mock-rpc")
+        .join(format!("{}-{nonce}", std::process::id()));
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut session = crate::simulation::SimulationSession::new(profile, observation, &dir)?;
+    session
+        .engine
+        .set_observe_only(args.iter().any(|arg| arg == "--observe-only"))?;
+    let mut widgets = crate::lua::WidgetManager::new(&[] as &[&Path]);
+    let mut widget_state = json!({});
+    let mut capture_index = 0u64;
+    let result = (|| -> Result<()> {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            let line = line.map_err(|e| e.to_string())?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if line.len() > 4 * 1024 * 1024 {
+                output(&json!({"id":null,"ok":false,"error":"mock-rpc request exceeds 4 MiB"}))?;
+                continue;
+            }
+            let parsed: Result<Value> = serde_json::from_str(&line).map_err(|e| e.to_string());
+            let id = parsed
+                .as_ref()
+                .ok()
+                .and_then(|request| request.get("id").cloned())
+                .unwrap_or(Value::Null);
+            let answer: Result<Value> = parsed.and_then(|mut request| {
+                let operation = request.get("op").and_then(Value::as_str).ok_or("missing op")?;
+                match operation {
+                "observe" => {
+                    session.observe(field(&request, "observation")?)?;
+                    Ok(json!({"updated":true}))
+                }
+                "advance" => {
+                    session.advance(field(&request, "ms")?)?;
+                    Ok(json!({"now_ms":session.virtual_time_ms()?,"status":session.engine.status()}))
+                }
+                "virtual_time" => Ok(json!({"now_ms":session.virtual_time_ms()?})),
+                "trace" => Ok(json!({"events":session.trace()?})),
+                "widgets" => {
+                    let paths: Vec<PathBuf> = field(&request,"paths")?;
+                    if paths.len() > 64 { return Err("at most 64 mock widgets are supported".into()); }
+                    let state = request.get("state").cloned().unwrap_or(json!({}));
+                    if !state.is_object() { return Err("widget state must be an object".into()); }
+                    widgets = crate::lua::WidgetManager::new(&paths);
+                    widget_state = state;
+                    Ok(render_mock_widgets(&mut widgets,&widget_state,session.engine.status()))
+                }
+                "widget_state" => {
+                    let state: Value = field(&request,"state")?;
+                    if !state.is_object() { return Err("widget state must be an object".into()); }
+                    widget_state = state;
+                    Ok(render_mock_widgets(&mut widgets,&widget_state,session.engine.status()))
+                }
+                "render_widgets" => Ok(render_mock_widgets(&mut widgets,&widget_state,session.engine.status())),
+                "clear_widgets" => {
+                    widgets = crate::lua::WidgetManager::new(&[] as &[&Path]);
+                    Ok(json!({"cleared":true}))
+                }
+                "screenshot" => {
+                    if request.get("path").and_then(Value::as_str).is_none() {
+                        capture_index += 1;
+                        request["path"] = json!(dir.join("captures").join(format!("capture-{capture_index}.bmp")));
+                    }
+                    dispatch(&mut session.engine, &request)
+                }
+                _ => dispatch(&mut session.engine, &request),
+                }
+            }).map(|mut value| {
+                if let Some(object) = value.as_object_mut() { object.insert("simulated".into(),json!(true)); }
+                value
+            });
+            output(&match answer {
+                Ok(value) => json!({"id":id,"ok":true,"result":value}),
+                Err(error) => json!({"id":id,"ok":false,"error":error}),
+            })?;
+        }
+        Ok(())
+    })();
+    let _ = session.engine.pause();
+    let _ = fs::remove_dir_all(&dir);
+    result
 }
 
 fn rpc<B: Backend>(engine: Engine<B>, status: StatusFile) -> Result<()> {
@@ -315,6 +436,10 @@ fn dispatch<B: Backend>(engine: &mut Engine<B>, request: &Value) -> Result<Value
         "evaluate" => Ok(json!({"matches":engine.matches(&field(request,"condition")?)?})),
         "pixel" => Ok(json!({"color":engine.backend.pixel(field(request,"point")?)?})),
         "clipboard" => Ok(json!({"text":engine.backend.clipboard()?})),
+        "sound" => {
+            engine.backend.sound(field(request, "cue")?)?;
+            Ok(json!({"played":true}))
+        }
         "screenshot" => {
             let capture = engine.backend.screenshot(
                 request

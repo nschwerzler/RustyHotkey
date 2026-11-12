@@ -493,7 +493,8 @@ impl<B: Backend> Engine<B> {
     }
     fn record_event(&mut self, kind: &str, key: Option<u16>) {
         self.input_sequence = self.input_sequence.wrapping_add(1);
-        let mut event = json!({"sequence": self.input_sequence, "kind": kind, "at_ms": now_ms()});
+        let at_ms = self.backend.virtual_time_ms().unwrap_or_else(now_ms);
+        let mut event = json!({"sequence": self.input_sequence, "kind": kind, "at_ms": at_ms});
         if let Some(key) = key {
             event["key"] = Value::String(key_name(key));
         }
@@ -959,10 +960,16 @@ fn key_name(key: u16) -> String {
     if (0x101..=0x105).contains(&key) {
         return format!("Mouse{}", key - 0x100);
     }
+    if (0x60..=0x69).contains(&key) {
+        return format!("Numpad{}", key - 0x60);
+    }
     match key {
         0x41..=0x5a => format!("Key{}", char::from_u32(key as u32).unwrap_or('?')),
         0x30..=0x39 => format!("Digit{}", key - 0x30),
         0x70..=0x87 => format!("F{}", key - 0x6f),
+        0x08 => "Backspace".into(),
+        0x13 => "Pause".into(),
+        0x14 => "CapsLock".into(),
         0x10 => "ShiftLeft".into(),
         0x11 => "ControlLeft".into(),
         0x12 => "AltLeft".into(),
@@ -974,6 +981,29 @@ fn key_name(key: u16) -> String {
         0x26 => "ArrowUp".into(),
         0x27 => "ArrowRight".into(),
         0x28 => "ArrowDown".into(),
+        0x21 => "PageUp".into(),
+        0x22 => "PageDown".into(),
+        0x23 => "End".into(),
+        0x24 => "Home".into(),
+        0x2c => "PrintScreen".into(),
+        0x2d => "Insert".into(),
+        0x2e => "Delete".into(),
+        0x5b => "MetaLeft".into(),
+        0x5c => "MetaRight".into(),
+        0x5d => "ContextMenu".into(),
+        0x6a => "NumpadMultiply".into(),
+        0x6b => "NumpadAdd".into(),
+        0x6d => "NumpadSubtract".into(),
+        0x6e => "NumpadDecimal".into(),
+        0x6f => "NumpadDivide".into(),
+        0x90 => "NumLock".into(),
+        0x91 => "ScrollLock".into(),
+        0xa0 => "ShiftLeft".into(),
+        0xa1 => "ShiftRight".into(),
+        0xa2 => "ControlLeft".into(),
+        0xa3 => "ControlRight".into(),
+        0xa4 => "AltLeft".into(),
+        0xa5 => "AltRight".into(),
         0xba => "Semicolon".into(),
         0xbb => "Equal".into(),
         0xbc => "Comma".into(),
@@ -1071,6 +1101,60 @@ mod tests {
             tick_ms: 10,
             rules: vec![],
         }
+    }
+    #[test]
+    fn native_key_names_match_input_monitor_dom_codes() {
+        let mappings = [
+            (8, "Backspace"),
+            (9, "Tab"),
+            (13, "Enter"),
+            (16, "ShiftLeft"),
+            (17, "ControlLeft"),
+            (18, "AltLeft"),
+            (19, "Pause"),
+            (20, "CapsLock"),
+            (27, "Escape"),
+            (32, "Space"),
+            (33, "PageUp"),
+            (34, "PageDown"),
+            (35, "End"),
+            (36, "Home"),
+            (37, "ArrowLeft"),
+            (38, "ArrowUp"),
+            (39, "ArrowRight"),
+            (40, "ArrowDown"),
+            (44, "PrintScreen"),
+            (45, "Insert"),
+            (46, "Delete"),
+            (91, "MetaLeft"),
+            (92, "MetaRight"),
+            (93, "ContextMenu"),
+            (96, "Numpad0"),
+            (105, "Numpad9"),
+            (106, "NumpadMultiply"),
+            (107, "NumpadAdd"),
+            (109, "NumpadSubtract"),
+            (110, "NumpadDecimal"),
+            (111, "NumpadDivide"),
+            (144, "NumLock"),
+            (145, "ScrollLock"),
+            (160, "ShiftLeft"),
+            (161, "ShiftRight"),
+            (162, "ControlLeft"),
+            (163, "ControlRight"),
+            (164, "AltLeft"),
+            (165, "AltRight"),
+            (186, "Semicolon"),
+            (222, "Quote"),
+        ];
+        for (key, expected) in mappings {
+            assert_eq!(key_name(key), expected, "virtual key {key}");
+        }
+        assert_eq!(key_name(112), "F1");
+        assert_eq!(key_name(135), "F24");
+        assert_eq!(key_name(0x100), "VK_100");
+        assert_eq!(key_name(0x106), "VK_106");
+        assert_eq!(key_name(0xdead), "VK_DEAD");
     }
     #[test]
     fn starts_paused_and_latches_abort() {

@@ -56,6 +56,19 @@ pub struct Observation {
     pub ocr: Vec<TextBox>,
     #[serde(default)]
     pub cursor: Point,
+    #[serde(default)]
+    pub screenshot: Option<ScriptedCapture>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptedCapture {
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub solid_color: Option<u32>,
+    #[serde(default)]
+    pub bgra: Vec<u8>,
 }
 
 /// Backward-compatible descriptive name for a scripted observation frame.
@@ -374,6 +387,7 @@ pub fn validate_scenario(scenario: &SimulationScenario) -> Result<()> {
         }
         prior_time = Some(frame.at_ms);
         let observation = &frame.observation;
+        validate_observation(observation)?;
         total_observation_items = total_observation_items
             .saturating_add(observation.keys_down.len())
             .saturating_add(observation.pixels.len())
@@ -622,8 +636,68 @@ fn apply_timeline(state: &mut ScriptedState, at_ms: u64) {
     }
 }
 
-struct SimulationBackend {
+pub struct SimulationBackend {
     state: Arc<Mutex<ScriptedState>>,
+}
+
+/// Interactive deterministic backend session for JSON-line clients. It uses
+/// the production Engine while keeping all observations and time in memory.
+pub struct SimulationSession {
+    pub engine: Engine<SimulationBackend>,
+    state: Arc<Mutex<ScriptedState>>,
+}
+impl SimulationSession {
+    pub fn new(profile: Profile, observation: Observation, state_dir: &Path) -> Result<Self> {
+        validate_observation(&observation)?;
+        let state = Arc::new(Mutex::new(ScriptedState {
+            observation: Some(observation),
+            ..Default::default()
+        }));
+        let engine = Engine::new(
+            SimulationBackend {
+                state: state.clone(),
+            },
+            profile,
+            state_dir.to_path_buf(),
+        )?;
+        Ok(Self { engine, state })
+    }
+    pub fn observe(&mut self, observation: Observation) -> Result<()> {
+        validate_observation(&observation)?;
+        self.state
+            .lock()
+            .map_err(|_| "simulation state lock poisoned".into())
+            .map(|mut state| {
+                state.observation = Some(observation);
+            })
+    }
+    pub fn advance(&mut self, ms: u64) -> Result<()> {
+        self.engine.backend.sleep_ms(ms)
+    }
+    pub fn virtual_time_ms(&self) -> Result<u64> {
+        self.state
+            .lock()
+            .map_err(|_| "simulation state lock poisoned".into())
+            .map(|state| state.virtual_time_ms)
+    }
+    pub fn trace(&self) -> Result<Vec<ObservedEvent>> {
+        self.state
+            .lock()
+            .map_err(|_| "simulation state lock poisoned".into())
+            .map(|state| {
+                state
+                    .events
+                    .iter()
+                    .enumerate()
+                    .map(|(operation, event)| ObservedEvent {
+                        frame: 0,
+                        operation,
+                        at_ms: event.at_ms,
+                        event: event.event.clone(),
+                    })
+                    .collect()
+            })
+    }
 }
 impl SimulationBackend {
     fn observation(&self) -> Result<Observation> {
@@ -634,6 +708,61 @@ impl SimulationBackend {
             .clone()
             .ok_or_else(|| "simulation observation is not set".into())
     }
+}
+fn validate_observation(observation: &Observation) -> Result<()> {
+    if !valid_point(observation.cursor) {
+        return Err("observation cursor must be normalized".into());
+    }
+    if observation.keys_down.len() > MAX_KEYS
+        || observation.pixels.len() > MAX_PIXELS
+        || observation.ocr.len() > MAX_OCR_BOXES
+    {
+        return Err("observation exceeds supported limits".into());
+    }
+    if observation
+        .keys_down
+        .iter()
+        .any(|key| !(1..=0xff).contains(key))
+    {
+        return Err("observed keys must be in the 1..=255 range".into());
+    }
+    if observation
+        .pixels
+        .iter()
+        .any(|p| !valid_point(p.point) || p.color > 0x00ff_ffff)
+    {
+        return Err("pixel observations require normalized points and RGB colors".into());
+    }
+    if observation.ocr.iter().any(|item| {
+        item.text.is_empty() || item.text.len() > MAX_OCR_TEXT_BYTES || !valid_region(item.region)
+    }) {
+        return Err("OCR observations require bounded text and normalized regions".into());
+    }
+    let observation_bytes = observation.clipboard.len().saturating_add(
+        observation
+            .ocr
+            .iter()
+            .map(|item| item.text.len())
+            .sum::<usize>(),
+    );
+    if observation.clipboard.len() > MAX_EFFECT_BYTES || observation_bytes > MAX_EFFECT_BYTES {
+        return Err("observation text exceeds the size limit".into());
+    }
+    if let Some(shot) = &observation.screenshot {
+        if shot.width == 0
+            || shot.height == 0
+            || shot.width as usize * shot.height as usize > 4_194_304
+            || shot.solid_color.map_or(false, |c| c > 0x00ff_ffff)
+        {
+            return Err("scripted screenshot is invalid or too large".into());
+        }
+        if shot.solid_color.is_none()
+            && shot.bgra.len() != shot.width as usize * shot.height as usize * 4
+        {
+            return Err("scripted screenshot BGRA length is invalid".into());
+        }
+    }
+    Ok(())
 }
 impl Backend for SimulationBackend {
     fn virtual_time_ms(&self) -> Option<u64> {
@@ -704,8 +833,59 @@ impl Backend for SimulationBackend {
         });
         Ok(())
     }
-    fn screenshot(&mut self, _region: Option<Region>) -> Result<Capture> {
-        Err("screenshot observations are not supported by this simulator".into())
+    fn screenshot(&mut self, region: Option<Region>) -> Result<Capture> {
+        let shot = self
+            .observation()?
+            .screenshot
+            .ok_or_else(|| "screenshot observation missing".to_string())?;
+        let bgra = if let Some(color) = shot.solid_color {
+            color
+                .to_le_bytes()
+                .repeat(shot.width as usize * shot.height as usize)
+        } else {
+            shot.bgra
+        };
+        if shot.width == 0 || shot.height == 0 || bgra.len() > 16 * 1024 * 1024 {
+            return Err("scripted screenshot is invalid or too large".into());
+        }
+        let (x, y, width, height) = match region {
+            None => (0, 0, shot.width, shot.height),
+            Some(region) => {
+                if !valid_region(region) {
+                    return Err("screenshot region must be normalized".into());
+                }
+                let x0 = (region.x * shot.width as f64).floor() as u32;
+                let y0 = (region.y * shot.height as f64).floor() as u32;
+                let x1 = ((region.x + region.width) * shot.width as f64)
+                    .ceil()
+                    .min(shot.width as f64) as u32;
+                let y1 = ((region.y + region.height) * shot.height as f64)
+                    .ceil()
+                    .min(shot.height as f64) as u32;
+                if x1 <= x0 || y1 <= y0 {
+                    return Err("screenshot region is empty".into());
+                }
+                (x0, y0, x1 - x0, y1 - y0)
+            }
+        };
+        if x == 0 && y == 0 && width == shot.width && height == shot.height {
+            return Ok(Capture {
+                width,
+                height,
+                bgra,
+            });
+        }
+        let mut cropped = Vec::with_capacity(width as usize * height as usize * 4);
+        for row in y..y + height {
+            let start = (row as usize * shot.width as usize + x as usize) * 4;
+            let end = start + width as usize * 4;
+            cropped.extend_from_slice(&bgra[start..end]);
+        }
+        Ok(Capture {
+            width,
+            height,
+            bgra: cropped,
+        })
     }
     fn ocr(&mut self, region: Option<Region>) -> Result<Vec<TextBox>> {
         let boxes = self.observation()?.ocr;

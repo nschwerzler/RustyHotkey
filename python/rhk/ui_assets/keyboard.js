@@ -23,6 +23,8 @@
   const localHeld = new Set();
   const playbackHeld = new Set();
   const MAX_PLAYBACK_ROWS = 600;
+  const MAX_IMPORTED_EVENTS = 100000;
+  const MAX_SIMULATION_MS = 86400000;
   const MIN_EVENT_DWELL_MS = 120;
   let remoteHeld = [], cursor = 0, gapCount = 0, timer = null, polling = false, demoRunning = false, simulationRunning = false;
   const playback = {items: [], index: 0, timer: null, playing: false, speed: 1, dueAt: 0, scheduledAt: 0, scheduledVirtual: 0, scheduledFloor: 0, delay: 0, remainingVirtual: 0, remainingFloor: 0, currentAt: 0, currentRow: null, truncated: false, focus: null};
@@ -181,7 +183,7 @@
     resetPlayback();
     if (playback.truncated) $('simulation-play-status').textContent = `Ready. Playback is limited to the first ${MAX_PLAYBACK_ROWS} timeline rows.`;
   }
-  function showSimulationResult(result, scenario) {
+  function showSimulationResult(result, scenario, options = {}) {
     const frames = Array.isArray(result.frames) ? result.frames : [];
     const steps = frames.flatMap((frame, frameIndex) => (Array.isArray(frame.operations) ? frame.operations : []).map((operation, operationIndex) => ({frame: frameIndex + 1, index: operationIndex + 1, ...operation})));
     const failures = steps.filter(step => step.ok === false);
@@ -198,9 +200,66 @@
     $('simulation-last-state').textContent = JSON.stringify(lastStep?.status ?? result.final_status ?? {}, null, 2);
     $('simulation-result').hidden = false;
     preparePlayback(result, scenario);
+    if (options.autoplay === false) {
+      $('simulation-status').textContent = options.status || 'Simulation trace loaded. No scenario was run.';
+      $('simulation-play-status').textContent = playback.items.length
+        ? 'Trace loaded. Choose Play scenario to inspect it.'
+        : 'The trace contains no events to play.';
+      return;
+    }
     $('simulation-status').textContent = failures.length ? `What-if complete with ${failures.length} failed step${failures.length === 1 ? '' : 's'}. Review the trace below.` : 'What-if complete. Review the trace below.';
     if (prefersReducedMotion()) $('simulation-play-status').textContent = 'Ready. Reduced motion is enabled; choose Play scenario to start the trace.';
     else playPlayback();
+  }
+  function validateImportedTrace(trace) {
+    if (!trace || typeof trace !== 'object' || Array.isArray(trace) || trace.mode !== 'simulation' || trace.native_input !== false) {
+      throw new Error('Trace must have mode "simulation" and native_input false.');
+    }
+    if (!Array.isArray(trace.frames) || trace.frames.length !== 0) throw new Error('Trace frames must be an empty array.');
+    if (!Array.isArray(trace.events) || trace.events.length > MAX_IMPORTED_EVENTS) throw new Error('Trace events must be an array of at most 100,000 entries.');
+    if (!trace.final_status || typeof trace.final_status !== 'object' || Array.isArray(trace.final_status)) throw new Error('Trace final_status must be an object.');
+    let priorAt = 0;
+    for (const [index, observed] of trace.events.entries()) {
+      if (!observed || typeof observed !== 'object' || Array.isArray(observed)
+          || !Number.isSafeInteger(observed.at_ms) || observed.at_ms < priorAt || observed.at_ms > MAX_SIMULATION_MS
+          || !Number.isInteger(observed.frame) || observed.frame < 0 || observed.frame >= 10000
+          || !Number.isInteger(observed.operation) || observed.operation < 0 || observed.operation >= 10000) {
+        throw new Error(`Trace event ${index + 1} has invalid frame, operation, or virtual timestamp.`);
+      }
+      priorAt = observed.at_ms;
+      const event = observed.event;
+      if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error(`Trace event ${index + 1} has no input event.`);
+      if (event.type === 'key') {
+        if (!Number.isInteger(event.key) || event.key < 1 || event.key > 255 || typeof event.down !== 'boolean') throw new Error(`Trace event ${index + 1} has an invalid key event.`);
+      } else if (event.type === 'button') {
+        if (!Number.isInteger(event.button) || event.button < 1 || event.button > 5 || typeof event.down !== 'boolean') throw new Error(`Trace event ${index + 1} has an invalid button event.`);
+      } else if (event.type === 'move') {
+        if (!Number.isFinite(event.x) || !Number.isFinite(event.y) || event.x < 0 || event.x > 1 || event.y < 0 || event.y > 1) throw new Error(`Trace event ${index + 1} has an invalid move event.`);
+      } else if (event.type === 'wheel') {
+        if (!Number.isInteger(event.delta) || event.delta === 0 || Math.abs(event.delta) > 120000 || typeof event.horizontal !== 'boolean') throw new Error(`Trace event ${index + 1} has an invalid wheel event.`);
+      } else if (event.type === 'text') {
+        if (typeof event.text !== 'string' || event.text.length > 1000000) throw new Error(`Trace event ${index + 1} has an invalid text event.`);
+      } else {
+        throw new Error(`Trace event ${index + 1} has an unsupported event type.`);
+      }
+    }
+    return {frames: [], events: trace.events, final_status: trace.final_status};
+  }
+  function loadSimulationTrace() {
+    if (simulationRunning) { $('simulation-status').textContent = 'Wait for the running what-if to finish before loading a trace.'; return; }
+    const input = $('simulation-scenario').value;
+    if (new TextEncoder().encode(input).byteLength > 512 * 1024) { $('simulation-status').textContent = 'Trace exceeds the 512 KiB editor limit.'; return; }
+    let trace;
+    try { trace = JSON.parse(input); }
+    catch (error) { $('simulation-status').textContent = `Invalid JSON: ${error.message}`; return; }
+    let result;
+    try { result = validateImportedTrace(trace); }
+    catch (error) { $('simulation-status').textContent = `Cannot load trace: ${error.message}`; return; }
+    resetPlayback();
+    showSimulationResult(result, {frames: []}, {
+      autoplay: false,
+      status: 'Simulation trace loaded. No scenario ran and no API was called.'
+    });
   }
   async function runSimulation() {
     if (simulationRunning) return;
@@ -256,6 +315,7 @@
   $('simulation-scenario').value = JSON.stringify(sampleScenario, null, 2);
   $('simulation-sample').addEventListener('click', () => { $('simulation-scenario').value = JSON.stringify(sampleScenario, null, 2); $('simulation-status').textContent = 'Generic sample loaded. The scenario has not been run.'; });
   $('simulation-run').addEventListener('click', runSimulation);
+  $('simulation-load-trace').addEventListener('click', loadSimulationTrace);
   $('simulation-play-toggle').addEventListener('click', () => playback.playing ? pausePlayback() : playPlayback());
   $('simulation-play-restart').addEventListener('click', () => { resetPlayback(); playPlayback(); });
   $('simulation-play-speed').addEventListener('change', e => {

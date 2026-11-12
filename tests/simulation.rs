@@ -115,6 +115,7 @@ fn observation(target_present: bool, focused: bool) -> Observation {
         clipboard: "ready".into(),
         ocr: vec![],
         cursor: Point { x: 0.5, y: 0.5 },
+        screenshot: None,
     }
 }
 

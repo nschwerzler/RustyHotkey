@@ -6,7 +6,7 @@ RustyHotkey (RHK) is a generic Windows x64 automation framework. The stable nati
 
 - `rhk`: CLI and newline-delimited JSON (`rpc PROFILE` or `db DATABASE`).
 - Rust: reusable `model`, `runtime`, `workflow`, `recording`, `platform`, `store`, and `lua` modules.
-- Python: `from rhk import ...` or `from rustyhotkey import ...`; `Client` wraps `rhk rpc PROFILE`, and `Database` wraps `rhk db DATABASE`.
+- Python: `from rhk import ...` or `from rustyhotkey import ...`; `Client` wraps `rhk rpc PROFILE`, `MockClient` wraps `rhk mock-rpc PROFILE OBSERVATION.json` with no live fallback, and `Database` wraps `rhk db DATABASE`.
 
 Read [docs/usage.md](docs/usage.md) for call patterns, [docs/api.md](docs/api.md) for schemas, and [docs/capabilities.md](docs/capabilities.md) for implementation status. Existing focused manuals: [Python](docs/python.md), [database](docs/database.md), [Lua](docs/lua.md), [scenario simulation](docs/simulation.md), [bots](docs/bots.md), [keyboard monitor](docs/keyboard.md), and [UI](docs/ui.md).
 

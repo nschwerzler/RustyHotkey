@@ -11,12 +11,12 @@ than controlling a user's application.
 | Pixels, clipboard, capture, OCR | RPC inspection operations; capture writes BMP | implemented in runtime/backend |
 | Conditions and workflows | modifiers, pixel masks/patterns, delayed rules, typed workflow steps; validate and dry-run | implemented |
 | Observe-only session | `run`/`rpc --observe-only` and Python `Client(observe_only=True)` refuse arm and input-producing operations | implemented; status and observation remain available |
-| Scenario simulation | version 1 JSON scenarios run the real engine against a scripted mock backend; bounded trace, rule effects, notifications and sounds | implemented; no operating-system input; see [simulation.md](simulation.md) |
+| Scenario simulation | version 1 batch scenarios and interactive Python `MockClient` run the real engine against scripted observations; bounded virtual-time trace, screenshot/OCR/pixel fixtures | implemented; no operating-system input; see [simulation.md](simulation.md) |
 | Recording/replay | CLI `record`/`replay`, schema-versioned JSON | implemented |
 | Control | `arm`, `pause`, `abort`, `heartbeat`, `hotkeys`, status | implemented; script, execution, pause, hotkey and dormant states are separate |
 | Turso Store/cache | Rust `Store`, CLI `db`, Python `Database` | implemented |
 | Web GET/cache | Rust, `rhk fetch`, DB RPC `fetch`, Python `Database.fetch` | native loopback HTTP/cache tests |
-| Lua widgets | selected files, `widgets`/`widget_state`/`clear_widgets`, Python helpers | sandbox, reload and bounds tests; no files means no overlay |
+| Lua widgets | selected files, `widgets`/`widget_state`/`clear_widgets`, Python helpers, mock `render_widgets()` | sandbox, reload and bounds tests; mock rendering returns a spec without a native overlay; no files means no overlay |
 | Native overlay | target-relative click-through, focus-aware, capture-excluded | implemented on Windows when explicitly constructed |
 | Tray | per-script icon, independent pause/edit/exit/hotkeys controls, dormant/running colors | started by `run`/`rpc`; `--no-tray` disables it; `rhk tray` provides global controls |
 | Bot workspace | loopback UI, `framework_reference` and `simulate_profile` tools, bounded handoffs, provider adapters, vault-backed keys | implemented in Python package; see [bots.md](bots.md) |

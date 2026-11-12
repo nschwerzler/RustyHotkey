@@ -58,7 +58,7 @@ class CredentialVault:
     """Windows Credential Manager vault, with no plaintext-file fallback."""
     def __init__(self):
         if os.name != "nt": raise BotError("Credential Manager is Windows-only; inject a vault for tests")
-        self._adv = ctypes.windll.advapi32
+        self._adv = ctypes.WinDLL("advapi32", use_last_error=True)
 
     def put(self, key: str, value: str) -> None:
         # Credential Manager details are kept behind this small boundary. The
@@ -77,7 +77,10 @@ class CredentialVault:
             c = ctypes.cast(p, ctypes.POINTER(type("CRED", (ctypes.Structure,), {"_fields_": [("Flags", ctypes.wintypes.DWORD), ("Type", ctypes.wintypes.DWORD), ("TargetName", ctypes.wintypes.LPWSTR), ("Comment", ctypes.wintypes.LPWSTR), ("LastWritten", ctypes.wintypes.FILETIME), ("BlobSize", ctypes.wintypes.DWORD), ("Blob", ctypes.POINTER(ctypes.c_byte)), ("Persist", ctypes.wintypes.DWORD), ("AttrCount", ctypes.wintypes.DWORD), ("Attributes", ctypes.c_void_p), ("TargetAlias", ctypes.wintypes.LPWSTR), ("UserName", ctypes.wintypes.LPWSTR)]})))
             return ctypes.string_at(c.contents.Blob, c.contents.BlobSize).decode("utf-16-le")
         finally: self._adv.CredFree(p)
-    def delete(self, key: str) -> None: self._adv.CredDeleteW(key, 1, 0)
+    def delete(self, key: str) -> None:
+        if not self._adv.CredDeleteW(key, 1, 0):
+            if ctypes.get_last_error() != 1168:  # ERROR_NOT_FOUND is already deleted.
+                raise BotError("Credential Manager delete failed")
 
 
 class CacheStore:
@@ -279,7 +282,30 @@ class BotService:
     def delete_provider(self, pid: str) -> None:
         values = self._providers()
         if pid not in values: raise BotError("provider is unavailable")
-        del values[pid]; self.store.put("rhk.bots", "providers", values)
+        if any(bot.get("provider_id") == pid for bot in self._bots().values()):
+            raise BotError("provider is in use by one or more bots; reassign them before removing it")
+        values = dict(values)
+        config = values[pid]
+        secret_id = config.get("secret_id")
+        del values[pid]
+        try:
+            self.store.put("rhk.bots", "providers", values)
+        except Exception as e:
+            raise BotError("provider removal failed; provider configuration and credential remain") from e
+        if secret_id:
+            try:
+                self.vault.delete(secret_id)
+            except Exception as e:
+                try:
+                    restored = dict(self._providers())
+                    restored[pid] = config
+                    self.store.put("rhk.bots", "providers", restored)
+                except Exception as rollback_error:
+                    try:
+                        if pid not in self._providers(): self.vault.delete(secret_id)
+                    except Exception: pass
+                    raise BotError("provider was removed, but credential deletion and configuration rollback failed") from rollback_error
+                raise BotError("provider removal failed; provider configuration was restored") from e
     def chat(self, bid: str, message: str) -> str:
         if bid not in self._bots() or not isinstance(message, str) or not message.strip() or len(message) > 12000: raise BotError("chat request is invalid")
         if not self._bots()[bid].get("provider_id"): raise BotError("configure a provider before chatting")

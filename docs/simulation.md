@@ -65,10 +65,9 @@ Call `run_scenario(scenario, state_dir)` from Rust. The supplied state directory
 is used by `Engine` for its abort latch and pause state; callers should create a
 unique scenario directory under `%APPDATA%/RustyHotkey/simulation` and remove it
 after the engine has been dropped. Keep scenario files and build output outside
-the repository. The simulator supports observations used by conditions and
-input safety. Screenshot capture remains unsupported. OCR conditions read the
-frame's scripted word boxes, join their text in order, and optionally filter
-boxes to those overlapping the requested normalized region. Each box has
+the repository. OCR conditions read the frame's scripted word boxes, join
+their text in order, and optionally filter boxes to those overlapping the
+requested normalized region. Each box has
 non-empty text up to 4,096 bytes and a valid normalized region; each frame
 supports at most 10,000 boxes within the existing combined observation and
 result limits. Notifications and sound cues are returned as simulated effects.
@@ -91,3 +90,58 @@ fn run(input: &str, state_dir: &Path) -> rustyhotkey::Result<()> {
 OCR is opt-in through `ocr_contains` conditions. Live OCR calls may be
 expensive, so workflows should choose polling intervals that fit their latency
 and resource budget instead of checking at every engine tick.
+
+## Interactive mock RPC
+
+`rhk mock-rpc PROFILE [OBSERVATION.json]` starts a JSON-lines session on the
+same Rust `Engine` with `SimulationBackend`. It accepts the normal RPC
+operations, but all observations and input effects are simulated. `observe`
+replaces the current observation; `advance {"ms":N}` advances virtual time;
+`virtual_time` returns the current clock; and `trace` returns the bounded full
+input event trace, including cleanup releases. The mock engine is a separate
+CLI mode and never falls back to `rpc`.
+
+Python applications can inject `MockClient` wherever their orchestration
+accepts the normal `Client` API. It accepts a profile path or JSON mapping and
+an initial observation mapping, and adds `observe()`, `advance()`,
+`virtual_time()`, and `trace()`. `advance()` returns the new virtual time.
+`trace()` returns the native trace shape and can be published through
+`InputMonitor.simulation()`. The context manager pauses before collecting the
+final trace and closing the mock process.
+
+An interactive observation uses the same fields as a batch frame:
+`target_present`, `focused`, optional `keys_down`, `pixels`, `clipboard`,
+`ocr`, and `cursor`. It also accepts an optional `screenshot` fixture:
+`{"width":640,"height":480,"solid_color":0}` paints an RGB solid color,
+or `{"width":1,"height":1,"bgra":[0,0,0,255]}` supplies the complete BGRA
+image. Captures are bounded to 4,194,304 pixels and 16 MiB of image data.
+Screenshot writes, pixel queries, and OCR reads use only the active fixture;
+they do not inspect a desktop or target process. Screenshot region arguments
+crop the fixture using normalized coordinates. OCR boxes are filtered by
+region overlap. Dynamic `observe()` payloads are bounded to 3 MiB, while
+staged fixtures remain under the application data directory and are removed on
+close. Mock sessions can load and update application-owned Lua widget files;
+`render_widgets()` returns `{simulated, spec, diagnostics}` without creating a
+real overlay.
+
+```python
+from rustyhotkey import InputMonitor, MockClient
+
+with MockClient("profile.json", {
+    "target_present": True,
+    "focused": True,
+    "pixels": [{"point": {"x": 0.5, "y": 0.5}, "color": 1122867}],
+    "ocr": [{"text": "Ready", "region": {"x": 0.1, "y": 0.1, "width": 0.4, "height": 0.2}}],
+    "screenshot": {"width": 640, "height": 480, "solid_color": 0},
+}) as engine:
+    engine.arm()
+    engine.execute([{"type": "tap", "key": 65}])
+    engine.advance(100)
+    trace = engine.trace()
+
+InputMonitor().simulation(trace, source="offline-plan")
+```
+
+The existing `rhk simulate SCENARIO.json` remains the batch format for
+deterministic profile-rule tests; `MockClient` lets Python orchestration call
+the same Rust APIs against the interactive fixture.

@@ -26,6 +26,15 @@ appear in the shared feed as `sim:scenario`. Playback only changes this page's
 display and never sends operating-system input. The CLI and Rust scenario API
 are documented in [simulation.md](simulation.md).
 
+To inspect a completed mock result from another RHK tool, paste its JSON into
+the editor and choose **Load simulation trace**. The importer requires
+`mode: "simulation"`, `native_input: false`, an empty `frames` array, a
+`final_status` object and at most 100,000 valid, time-ordered events. The JSON
+must fit the same 512 KiB editor limit. Loading only parses and validates local
+text; it makes no API call and does not run a scenario. Playback starts only
+when you choose **Play scenario**, including when reduced motion is on.
+This action changes only the keyboard display and never emits input.
+
 ## Script integration
 
 Python scripts launched through the app's **Run saved Python** action attach

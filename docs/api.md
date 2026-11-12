@@ -48,6 +48,13 @@ are `widgets` with `{paths, state}`, `widget_state` with `{state}`, and
 overlay. The native tool catalog is available through `rhk tools`. The separate
 `rhk simulate SCENARIO.json` command runs a version 1 scenario against a mock
 backend with no operating-system input; see [simulation.md](simulation.md).
+`rhk mock-rpc PROFILE [OBSERVATION.json]` starts the ordinary JSON-lines
+contract on an interactive mock backend. It accepts `observe`, `advance`,
+`virtual_time`, and `trace` helper operations in addition to engine operations.
+Python `MockClient` wraps this mode and never falls back to live `rpc`; see
+[Python](python.md) and [simulation](simulation.md). Screenshot regions crop
+the active fixture; `MockClient.render_widgets()` returns a simulated overlay
+specification and diagnostics without creating a native overlay.
 
 ## Database JSON-lines
 
