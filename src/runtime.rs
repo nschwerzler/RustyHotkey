@@ -1,4 +1,5 @@
 use crate::{Backend, Result, model::*};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -211,6 +212,13 @@ pub fn validate_actions(actions: &[Action], depth: usize) -> Result<()> {
                     return Err("wait is too large".into());
                 }
             }
+            Action::RandomWait { min_ms, max_ms } => {
+                if min_ms > max_ms || *max_ms > 1000 {
+                    return Err(
+                        "random wait bounds must satisfy 0 <= min_ms <= max_ms <= 1000".into(),
+                    );
+                }
+            }
             Action::Scroll { delta, .. } => {
                 if *delta == 0 || delta.unsigned_abs() > 120_000 {
                     return Err("scroll delta is out of bounds".into());
@@ -283,6 +291,7 @@ pub struct Engine<B: Backend> {
     clock_origin: Instant,
     observe_only: bool,
     pending_rules: HashMap<usize, Instant>,
+    random: StdRng,
 }
 
 impl<B: Backend> Engine<B> {
@@ -293,6 +302,11 @@ impl<B: Backend> Engine<B> {
         let pause_marker = fs::read(state_dir.join("pause.signal")).unwrap_or_default();
         let dormant = !backend.target_present()?;
         let initial_heartbeat = now_ms();
+        let random = if backend.virtual_time_ms().is_some() {
+            StdRng::seed_from_u64(0)
+        } else {
+            StdRng::from_entropy()
+        };
         Ok(Self {
             backend,
             profile,
@@ -322,6 +336,7 @@ impl<B: Backend> Engine<B> {
             clock_origin: Instant::now(),
             observe_only: false,
             pending_rules: HashMap::new(),
+            random,
         })
     }
     pub fn control_handle(&self) -> ControlHandle {
@@ -472,6 +487,15 @@ impl<B: Backend> Engine<B> {
         self.paused = false;
         self.heartbeat();
         Ok(())
+    }
+    pub fn focus_target(&mut self) -> Result<()> {
+        if self.observe_only {
+            return Err("session is observe-only".into());
+        }
+        if self.abort_latched {
+            return Err("abort latch is set".into());
+        }
+        self.backend.focus_target()
     }
     fn release_all(&mut self) -> Result<()> {
         let keys: Vec<_> = self.held_keys.iter().copied().collect();
@@ -774,6 +798,10 @@ impl<B: Backend> Engine<B> {
                 Action::Wait { ms } => {
                     self.wait_ms(*ms)?;
                 }
+                Action::RandomWait { min_ms, max_ms } => {
+                    let ms = self.random.gen_range(*min_ms..=*max_ms);
+                    self.wait_ms(ms)?;
+                }
             }
         }
         Ok(())
@@ -1050,6 +1078,8 @@ mod tests {
         focused: bool,
         keys: HashSet<u16>,
         events: Arc<Mutex<Vec<InputEvent>>>,
+        virtual_ms: Option<u64>,
+        lose_focus_at: Option<u64>,
     }
     impl Fake {
         fn new(events: Arc<Mutex<Vec<InputEvent>>>) -> Self {
@@ -1057,10 +1087,30 @@ mod tests {
                 focused: true,
                 keys: HashSet::new(),
                 events,
+                virtual_ms: None,
+                lose_focus_at: None,
             }
         }
     }
     impl Backend for Fake {
+        fn virtual_time_ms(&self) -> Option<u64> {
+            self.virtual_ms
+        }
+        fn sleep_ms(&mut self, ms: u64) -> Result<()> {
+            if let Some(time) = &mut self.virtual_ms {
+                *time += ms;
+                if self.lose_focus_at.is_some_and(|limit| *time >= limit) {
+                    self.focused = false;
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(ms));
+            }
+            Ok(())
+        }
+        fn focus_target(&mut self) -> Result<()> {
+            self.focused = true;
+            Ok(())
+        }
         fn focused(&mut self) -> Result<bool> {
             Ok(self.focused)
         }
@@ -1218,6 +1268,82 @@ mod tests {
         assert_eq!(events.lock().unwrap().len(), 2);
     }
     #[test]
+    fn random_wait_is_bounded_repeatable_and_cleans_up_on_focus_loss() {
+        assert!(
+            validate_action(&Action::RandomWait {
+                min_ms: 21,
+                max_ms: 20
+            })
+            .is_err()
+        );
+        assert!(
+            validate_action(&Action::RandomWait {
+                min_ms: 0,
+                max_ms: 1001
+            })
+            .is_err()
+        );
+        let run = || {
+            let mut fake = Fake::new(Arc::new(Mutex::new(vec![])));
+            fake.virtual_ms = Some(0);
+            let mut engine = Engine::new(
+                fake,
+                profile(),
+                std::env::temp_dir().join("rhk-random-wait-test"),
+            )
+            .unwrap();
+            engine.arm().unwrap();
+            let mut durations = Vec::new();
+            for _ in 0..20 {
+                let before = engine.elapsed_ms();
+                engine
+                    .execute(&[Action::RandomWait {
+                        min_ms: 11,
+                        max_ms: 20,
+                    }])
+                    .unwrap();
+                durations.push(engine.elapsed_ms() - before);
+            }
+            durations
+        };
+        let durations = run();
+        assert!(durations.iter().all(|ms| (11..=20).contains(ms)));
+        assert_eq!(durations, run());
+        let events = Arc::new(Mutex::new(vec![]));
+        let mut fake = Fake::new(events.clone());
+        fake.virtual_ms = Some(0);
+        fake.lose_focus_at = Some(10);
+        let mut engine = Engine::new(
+            fake,
+            profile(),
+            std::env::temp_dir().join("rhk-random-focus-test"),
+        )
+        .unwrap();
+        engine.arm().unwrap();
+        assert!(
+            engine
+                .execute(&[
+                    Action::Key {
+                        key: 65,
+                        down: true
+                    },
+                    Action::RandomWait {
+                        min_ms: 20,
+                        max_ms: 20
+                    }
+                ])
+                .is_err()
+        );
+        assert!(!engine.armed());
+        assert!(events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            InputEvent::Key {
+                key: 65,
+                down: false
+            }
+        )));
+    }
+    #[test]
     fn shared_abort_interrupts_wait() {
         let dir = std::env::temp_dir().join(format!("rustyhotkey-control-{}", now_ms()));
         let _ = fs::remove_dir_all(&dir);
@@ -1230,7 +1356,13 @@ mod tests {
             h.request_abort();
         });
         let started = Instant::now();
-        assert!(e.execute(&[Action::Wait { ms: 500 }]).is_err());
+        assert!(
+            e.execute(&[Action::RandomWait {
+                min_ms: 500,
+                max_ms: 500
+            }])
+            .is_err()
+        );
         assert!(started.elapsed() < Duration::from_millis(100));
         assert!(e.latched());
     }
@@ -1330,6 +1462,28 @@ mod tests {
                 .iter()
                 .any(|v| v["kind"] == "up")
         );
+    }
+    #[test]
+    fn explicit_focus_respects_observe_only_and_abort_without_arming() {
+        let events = Arc::new(Mutex::new(vec![]));
+        let dir = std::env::temp_dir().join(format!("rhk-focus-{}", now_ms()));
+        let mut engine = Engine::new(Fake::new(events), profile(), dir.clone()).unwrap();
+        engine.backend.focused = false;
+        engine.focus_target().unwrap();
+        assert!(engine.backend.focused);
+        assert!(!engine.armed());
+        engine.set_observe_only(true).unwrap();
+        engine.backend.focused = false;
+        assert!(engine.focus_target().is_err());
+        assert!(!engine.backend.focused);
+        engine.set_observe_only(false).unwrap();
+        engine.abort().unwrap();
+        assert!(engine.focus_target().is_err());
+        assert!(!engine.backend.focused);
+        assert!(!engine.armed());
+        assert_eq!(engine.status()["abort_latched"], true);
+        drop(engine);
+        let _ = fs::remove_dir_all(dir);
     }
     #[test]
     fn tray_resume_obeys_focus_and_abort_latch() {

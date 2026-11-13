@@ -14,6 +14,13 @@ pub struct Region {
     pub width: f64,
     pub height: f64,
 }
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Geometry {
+    pub width: u32,
+    pub height: u32,
+    pub screen_x: i32,
+    pub screen_y: i32,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Target {
@@ -66,6 +73,10 @@ pub enum Action {
     },
     Wait {
         ms: u64,
+    },
+    RandomWait {
+        min_ms: u64,
+        max_ms: u64,
     },
     Pause,
     SetHotkeys {

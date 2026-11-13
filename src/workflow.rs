@@ -106,6 +106,7 @@ fn count_waits(steps: &[Step]) -> Result<u64> {
                 for action in actions {
                     let value = match action {
                         Action::Wait { ms } => *ms,
+                        Action::RandomWait { max_ms, .. } => *max_ms,
                         Action::ClickBurst {
                             count, interval_ms, ..
                         } => u64::from(*count)
@@ -298,6 +299,23 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn random_wait_counts_maximum_toward_budget() {
+        let workflow = Workflow {
+            schema_version: 1,
+            steps: vec![Step::Repeat {
+                count: 3601,
+                steps: vec![Step::Actions {
+                    actions: vec![Action::RandomWait {
+                        min_ms: 0,
+                        max_ms: 1000,
+                    }],
+                }],
+            }],
+        };
+        assert!(validate(&workflow).is_err());
     }
 
     #[test]

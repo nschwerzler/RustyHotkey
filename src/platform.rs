@@ -75,8 +75,9 @@ mod windows_backend {
                 },
                 WindowsAndMessaging::{
                     EnumWindows, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
-                    GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
-                    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+                    GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW, IsIconic,
+                    IsWindowVisible, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+                    SM_YVIRTUALSCREEN, SW_RESTORE, SetForegroundWindow, ShowWindow,
                 },
             },
         },
@@ -87,6 +88,15 @@ mod windows_backend {
     pub struct WindowsBackend {
         target: model::Target,
         hwnd: Cell<HWND>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ClientGeometry {
+        hwnd: HWND,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
     }
 
     struct ThreadWaker(thread::Thread);
@@ -167,6 +177,32 @@ mod windows_backend {
             } else {
                 Ok((w, h))
             }
+        }
+        fn client_geometry(&self) -> Result<ClientGeometry> {
+            let (width, height) = self.client_size()?;
+            let hwnd = self.hwnd.get();
+            let mut origin = POINT { x: 0, y: 0 };
+            unsafe {
+                ClientToScreen(hwnd, &mut origin)
+                    .ok()
+                    .map_err(|e| format!("ClientToScreen: {e}"))?;
+            }
+            Ok(ClientGeometry {
+                hwnd,
+                x: origin.x,
+                y: origin.y,
+                width,
+                height,
+            })
+        }
+        fn check_ocr_geometry(&self, expected: &ClientGeometry) -> Result<()> {
+            if self.client_geometry()? != *expected {
+                return Err("target geometry changed during OCR".into());
+            }
+            if unsafe { GetForegroundWindow() } != expected.hwnd {
+                return Err("target lost focus during OCR".into());
+            }
+            Ok(())
         }
         fn client_point(&self, p: model::Point) -> Result<POINT> {
             let (w, h) = self.client_size()?;
@@ -437,6 +473,31 @@ mod windows_backend {
         fn focused(&mut self) -> Result<bool> {
             Ok(self.refresh()? && unsafe { GetForegroundWindow() == self.hwnd.get() })
         }
+        fn geometry(&mut self) -> Result<model::Geometry> {
+            let geometry = self.client_geometry()?;
+            Ok(model::Geometry {
+                width: geometry.width as u32,
+                height: geometry.height as u32,
+                screen_x: geometry.x,
+                screen_y: geometry.y,
+            })
+        }
+        fn focus_target(&mut self) -> Result<()> {
+            if !self.refresh()? {
+                return Err("target window was not found".into());
+            }
+            let hwnd = self.hwnd.get();
+            unsafe {
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(hwnd);
+                if GetForegroundWindow() != hwnd || !self.refresh()? || self.hwnd.get() != hwnd {
+                    return Err("target focus request was refused".into());
+                }
+            }
+            Ok(())
+        }
         fn key_down(&mut self, key: u16) -> Result<bool> {
             if key == 0 {
                 return Err("virtual key must be nonzero".into());
@@ -610,8 +671,12 @@ mod windows_backend {
             self.capture(r)
         }
         fn ocr(&mut self, region: Option<model::Region>) -> Result<Vec<model::TextBox>> {
+            let geometry = self.client_geometry()?;
+            let (ox, oy, _, _) = self.region(region)?;
+            self.check_ocr_geometry(&geometry)?;
             let cap = self.capture(region)?;
-            let (cw, ch) = self.client_size()?;
+            self.check_ocr_geometry(&geometry)?;
+            let (cw, ch) = (geometry.width, geometry.height);
             let writer = windows::Storage::Streams::DataWriter::new()
                 .map_err(|e| format!("DataWriter: {e}"))?;
             writer
@@ -639,7 +704,7 @@ mod windows_backend {
                     return Err(e);
                 }
             };
-            let (ox, oy, _, _) = self.region(region)?;
+            self.check_ocr_geometry(&geometry)?;
             let lines = result.Lines().map_err(|e| format!("OCR lines: {e}"))?;
             let mut out = Vec::new();
             for i in 0..lines.Size().map_err(|e| format!("OCR size: {e}"))? {
@@ -664,6 +729,7 @@ mod windows_backend {
                     });
                 }
             }
+            self.check_ocr_geometry(&geometry)?;
             Ok(out)
         }
         fn notify(&mut self, message: &str, _ttl_ms: u64) -> Result<()> {
@@ -695,6 +761,7 @@ mod windows_backend {
                 param: *mut c_void,
             ) -> *mut c_void;
             fn DestroyWindow(hwnd: *mut c_void) -> i32;
+            fn MoveWindow(hwnd: *mut c_void, x: i32, y: i32, w: i32, h: i32, repaint: i32) -> i32;
         }
         #[link(name = "gdi32")]
         unsafe extern "system" {
@@ -730,6 +797,25 @@ mod windows_backend {
             };
             assert!(!hwnd.is_null());
             TestWindow(hwnd)
+        }
+        #[test]
+        fn client_geometry_detects_window_move_resize_and_replacement() {
+            let title = format!("RHK geometry test {}", std::process::id());
+            let backend = WindowsBackend::new(model::Target {
+                window_class: Some("Static".into()),
+                window_title: Some(title.clone()),
+            })
+            .unwrap();
+            let first = window(&title);
+            let before = backend.client_geometry().unwrap();
+            assert_ne!(unsafe { MoveWindow(first.0, 10, 12, 80, 72, 1) }, 0);
+            let moved = backend.client_geometry().unwrap();
+            assert_ne!(before, moved);
+            assert!(backend.check_ocr_geometry(&before).is_err());
+            drop(first);
+            assert!(backend.client_geometry().is_err());
+            let _second = window(&title);
+            assert_ne!(backend.client_geometry().unwrap(), moved);
         }
         #[test]
         fn selector_and_window_lifecycle_capture() {

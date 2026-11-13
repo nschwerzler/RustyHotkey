@@ -114,7 +114,13 @@ An interactive observation uses the same fields as a batch frame:
 `ocr`, and `cursor`. It also accepts an optional `screenshot` fixture:
 `{"width":640,"height":480,"solid_color":0}` paints an RGB solid color,
 or `{"width":1,"height":1,"bgra":[0,0,0,255]}` supplies the complete BGRA
-image. Captures are bounded to 4,194,304 pixels and 16 MiB of image data.
+image. A caller-supplied file can instead be referenced as
+`{"width":640,"height":480,"bmp_path":"fixture.bmp"}`. The file must be
+a 32-bit uncompressed BMP with matching dimensions (top-down or bottom-up),
+and cannot be combined with `bgra` or `solid_color`. It is read when the
+observation is installed. Captures are bounded to 16,777,216 pixels and 64 MiB
+of image data. Explicit pixel observations take precedence; other pixel queries
+sample the image using normalized coordinates.
 Screenshot writes, pixel queries, and OCR reads use only the active fixture;
 they do not inspect a desktop or target process. Screenshot region arguments
 crop the fixture using normalized coordinates. OCR boxes are filtered by

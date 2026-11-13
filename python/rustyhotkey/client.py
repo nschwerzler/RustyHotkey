@@ -85,6 +85,10 @@ class Action:
         return cls("wait", {"ms": ms})
 
     @classmethod
+    def random_wait(cls, min_ms: int, max_ms: int) -> "Action":
+        return cls("random_wait", {"min_ms": min_ms, "max_ms": max_ms})
+
+    @classmethod
     def text(cls, text: str) -> "Action":
         return cls("text", {"text": text})
 
@@ -238,8 +242,12 @@ class Client:
             with self._lock: self._responses.pop(request_id, None)
 
     def status(self) -> Any: return self.request("status")
+    def geometry(self) -> Any: return self.request("geometry")
+    def observe_state(self, points: Iterable[Point | Mapping[str, Any]] = ()) -> Any:
+        return self.request("observe_state", points=[_json_value(p) for p in points])
     def input_events(self, after: int = 0) -> Any: return self.request("input_events", after=after)
     def arm(self) -> Any: return self.request("arm")
+    def focus(self) -> Any: return self.request("focus")
     def pause(self) -> Any: return self.request("pause")
     def abort(self) -> Any: return self.request("abort")
     def heartbeat(self) -> Any: return self.request("heartbeat")
@@ -249,6 +257,10 @@ class Client:
     def evaluate(self, condition: Mapping[str, Any]) -> Any: return self.request("evaluate", condition=condition)
     def screenshot(self, region: Region | Mapping[str, Any] | None = None, *, path: str | Path | None = None) -> Any:
         return self.request("screenshot", region=region, path=str(path) if path is not None else None)
+
+    def debug_screenshot(self, *, path: str | Path | None = None) -> Any:
+        """Save a full capture with the current Lua widgets drawn into it."""
+        return self.request("debug_screenshot", path=str(path) if path is not None else None)
     def ocr(self, region: Region | Mapping[str, Any] | None = None) -> Any: return self.request("ocr", region=region)
     def pixel(self, point: Point | Mapping[str, Any]) -> Any: return self.request("pixel", point=point)
     def clipboard(self) -> Any: return self.request("clipboard")

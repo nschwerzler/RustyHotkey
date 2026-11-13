@@ -30,6 +30,12 @@ pub trait Backend {
         self.focused()
     }
     fn focused(&mut self) -> Result<bool>;
+    fn geometry(&mut self) -> Result<model::Geometry> {
+        Err("geometry is unavailable in this backend".into())
+    }
+    fn focus_target(&mut self) -> Result<()> {
+        Err("focus is unavailable in this backend".into())
+    }
     fn key_down(&mut self, key: u16) -> Result<bool>;
     fn cursor(&mut self) -> Result<model::Point>;
     fn pixel(&mut self, point: model::Point) -> Result<u32>;

@@ -21,6 +21,7 @@ for line in sys.stdin:
     if op == "sleep": time.sleep(.3)
     result = {"op": op}
     if op == "pixel": result["point"] = req.get("point")
+    if op == "observe_state": result["points"] = req.get("points")
     print(json.dumps({"id": req.get("id"), "ok": op != "bad", "result": result,
                       "error": "rejected" if op == "bad" else None}), flush=True)
 '''
@@ -37,6 +38,9 @@ class ClientTests(unittest.TestCase):
     with tempfile.TemporaryDirectory() as d:
       tmp_path = Path(d)
       with client(tmp_path) as c:
+          self.assertEqual(c.focus()["op"], "focus")
+          self.assertEqual(c.geometry()["op"], "geometry")
+          self.assertEqual(c.observe_state([Point(.5, .25)])["points"], [{"x": .5, "y": .25}])
           self.assertEqual(c.execute([Action.tap(7), Action.wait(1)])["op"], "execute")
           self.assertEqual(c.pixel(Point(.5, .25))["point"], {"x": .5, "y": .25})
 

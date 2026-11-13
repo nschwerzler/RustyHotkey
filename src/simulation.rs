@@ -60,15 +60,45 @@ pub struct Observation {
     pub screenshot: Option<ScriptedCapture>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ScriptedCapture {
     pub width: u32,
     pub height: u32,
     #[serde(default)]
     pub solid_color: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bgra: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bmp_path: Option<std::path::PathBuf>,
+}
+
+impl<'de> Deserialize<'de> for ScriptedCapture {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            width: u32,
+            height: u32,
+            solid_color: Option<u32>,
+            bgra: Option<Vec<u8>>,
+            bmp_path: Option<std::path::PathBuf>,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        if fields.bmp_path.is_some() && (fields.solid_color.is_some() || fields.bgra.is_some()) {
+            return Err(serde::de::Error::custom(
+                "bmp_path cannot be combined with bgra or solid_color",
+            ));
+        }
+        Ok(Self {
+            width: fields.width,
+            height: fields.height,
+            solid_color: fields.solid_color,
+            bgra: fields.bgra.unwrap_or_default(),
+            bmp_path: fields.bmp_path,
+        })
+    }
 }
 
 /// Backward-compatible descriptive name for a scripted observation frame.
@@ -203,6 +233,10 @@ struct TimedInputEvent {
 /// must be a caller-owned scenario directory outside the repository.
 pub fn run_scenario(scenario: SimulationScenario, state_dir: &Path) -> Result<SimulationResult> {
     validate_scenario(&scenario)?;
+    let mut scenario = scenario;
+    for frame in &mut scenario.frames {
+        prepare_observation(&mut frame.observation)?;
+    }
     let frame_count = scenario.frames.len();
     let state = Arc::new(Mutex::new(ScriptedState::default()));
     {
@@ -379,6 +413,7 @@ pub fn validate_scenario(scenario: &SimulationScenario) -> Result<()> {
     }
     let mut total_wait_ms = 0u64;
     let mut total_observation_bytes = 0usize;
+    let mut total_capture_bytes = 0usize;
     let mut total_observation_items = 0usize;
     let mut prior_time = None;
     for frame in &scenario.frames {
@@ -388,6 +423,15 @@ pub fn validate_scenario(scenario: &SimulationScenario) -> Result<()> {
         prior_time = Some(frame.at_ms);
         let observation = &frame.observation;
         validate_observation(observation)?;
+        if let Some(shot) = &observation.screenshot {
+            if shot.solid_color.is_none() {
+                total_capture_bytes = total_capture_bytes
+                    .saturating_add(shot.width as usize * shot.height as usize * 4);
+                if total_capture_bytes > 64 * 1024 * 1024 {
+                    return Err("scenario captures exceed the size limit".into());
+                }
+            }
+        }
         total_observation_items = total_observation_items
             .saturating_add(observation.keys_down.len())
             .saturating_add(observation.pixels.len())
@@ -442,6 +486,7 @@ pub fn validate_scenario(scenario: &SimulationScenario) -> Result<()> {
                             .iter()
                             .filter_map(|action| match action {
                                 Action::Wait { ms } => Some(*ms),
+                                Action::RandomWait { max_ms, .. } => Some(*max_ms),
                                 Action::ClickBurst {
                                     count, interval_ms, ..
                                 } => Some((*count as u64).saturating_mul(*interval_ms)),
@@ -647,8 +692,9 @@ pub struct SimulationSession {
     state: Arc<Mutex<ScriptedState>>,
 }
 impl SimulationSession {
-    pub fn new(profile: Profile, observation: Observation, state_dir: &Path) -> Result<Self> {
+    pub fn new(profile: Profile, mut observation: Observation, state_dir: &Path) -> Result<Self> {
         validate_observation(&observation)?;
+        prepare_observation(&mut observation)?;
         let state = Arc::new(Mutex::new(ScriptedState {
             observation: Some(observation),
             ..Default::default()
@@ -662,8 +708,9 @@ impl SimulationSession {
         )?;
         Ok(Self { engine, state })
     }
-    pub fn observe(&mut self, observation: Observation) -> Result<()> {
+    pub fn observe(&mut self, mut observation: Observation) -> Result<()> {
         validate_observation(&observation)?;
+        prepare_observation(&mut observation)?;
         self.state
             .lock()
             .map_err(|_| "simulation state lock poisoned".into())
@@ -751,15 +798,71 @@ fn validate_observation(observation: &Observation) -> Result<()> {
     if let Some(shot) = &observation.screenshot {
         if shot.width == 0
             || shot.height == 0
-            || shot.width as usize * shot.height as usize > 4_194_304
+            || shot.width as usize * shot.height as usize > 16_777_216
             || shot.solid_color.map_or(false, |c| c > 0x00ff_ffff)
         {
             return Err("scripted screenshot is invalid or too large".into());
         }
-        if shot.solid_color.is_none()
+        if shot.bmp_path.is_some() && (shot.solid_color.is_some() || !shot.bgra.is_empty()) {
+            return Err("bmp_path cannot be combined with bgra or solid_color".into());
+        }
+        if shot.bmp_path.is_none()
+            && shot.solid_color.is_none()
             && shot.bgra.len() != shot.width as usize * shot.height as usize * 4
         {
             return Err("scripted screenshot BGRA length is invalid".into());
+        }
+    }
+    Ok(())
+}
+fn prepare_observation(observation: &mut Observation) -> Result<()> {
+    use std::io::Read;
+    let Some(shot) = &mut observation.screenshot else {
+        return Ok(());
+    };
+    let Some(path) = shot.bmp_path.take() else {
+        return Ok(());
+    };
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(64 * 1024 * 1024 + 55)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() < 54 {
+        return Err("invalid BMP header".into());
+    }
+    let u16_at = |i| u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+    let u32_at = |i| u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+    let width = u32_at(18) as i32;
+    let height = u32_at(22) as i32;
+    let size = shot.width as usize * shot.height as usize * 4;
+    if &bytes[..2] != b"BM"
+        || bytes.len() != size + 54
+        || u32_at(2) as usize != bytes.len()
+        || u32_at(6) != 0
+        || u32_at(10) != 54
+        || u32_at(14) != 40
+        || width <= 0
+        || width as u32 != shot.width
+        || height == 0
+        || height == i32::MIN
+        || height.unsigned_abs() != shot.height
+        || u16_at(26) != 1
+        || u16_at(28) != 32
+        || u32_at(30) != 0
+        || ![0, size as u32].contains(&u32_at(34))
+    {
+        return Err("invalid or mismatched 32-bit BMP fixture".into());
+    }
+    shot.bgra = bytes.split_off(54);
+    if height > 0 {
+        let stride = shot.width as usize * 4;
+        for row in 0..shot.height as usize / 2 {
+            let other = shot.height as usize - row - 1;
+            for x in 0..stride {
+                shot.bgra.swap(row * stride + x, other * stride + x);
+            }
         }
     }
     Ok(())
@@ -788,6 +891,21 @@ impl Backend for SimulationBackend {
     fn focused(&mut self) -> Result<bool> {
         Ok(self.observation()?.focused)
     }
+    fn geometry(&mut self) -> Result<crate::model::Geometry> {
+        let observation = self.observation()?;
+        if !observation.target_present {
+            return Err("target window is unavailable (backend dormant)".into());
+        }
+        let shot = observation
+            .screenshot
+            .ok_or("screenshot observation missing")?;
+        Ok(crate::model::Geometry {
+            width: shot.width,
+            height: shot.height,
+            screen_x: 0,
+            screen_y: 0,
+        })
+    }
     fn key_down(&mut self, key: u16) -> Result<bool> {
         let keys = self.observation()?.keys_down;
         Ok(keys.contains(&key)
@@ -802,12 +920,27 @@ impl Backend for SimulationBackend {
         Ok(self.observation()?.cursor)
     }
     fn pixel(&mut self, point: Point) -> Result<u32> {
-        self.observation()?
+        let observation = self.observation()?;
+        if let Some(pixel) = observation
             .pixels
-            .into_iter()
+            .iter()
             .find(|pixel| pixel.point.x == point.x && pixel.point.y == point.y)
-            .map(|pixel| pixel.color)
-            .ok_or_else(|| "pixel observation missing for requested point".into())
+        {
+            return Ok(pixel.color);
+        }
+        if !valid_point(point) {
+            return Err("pixel point must be normalized".into());
+        }
+        let shot = observation
+            .screenshot
+            .ok_or("pixel observation missing for requested point")?;
+        if let Some(color) = shot.solid_color {
+            return Ok(color);
+        }
+        let x = (point.x * (shot.width - 1) as f64).round() as usize;
+        let y = (point.y * (shot.height - 1) as f64).round() as usize;
+        let i = (y * shot.width as usize + x) * 4;
+        Ok((shot.bgra[i + 2] as u32) << 16 | (shot.bgra[i + 1] as u32) << 8 | shot.bgra[i] as u32)
     }
     fn clipboard(&mut self) -> Result<String> {
         Ok(self.observation()?.clipboard)
@@ -845,7 +978,7 @@ impl Backend for SimulationBackend {
         } else {
             shot.bgra
         };
-        if shot.width == 0 || shot.height == 0 || bgra.len() > 16 * 1024 * 1024 {
+        if shot.width == 0 || shot.height == 0 || bgra.len() > 64 * 1024 * 1024 {
             return Err("scripted screenshot is invalid or too large".into());
         }
         let (x, y, width, height) = match region {

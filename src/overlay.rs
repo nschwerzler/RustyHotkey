@@ -22,6 +22,12 @@ pub enum OverlayElement {
     Box {
         region: Region,
         color: u32,
+        #[serde(default)]
+        fill_color: Option<u32>,
+        #[serde(default)]
+        stroke_width: Option<u32>,
+        #[serde(default)]
+        border_radius: Option<u32>,
     },
     Circle {
         region: Region,
@@ -31,6 +37,14 @@ pub enum OverlayElement {
         point: Point,
         text: String,
         color: u32,
+        #[serde(default)]
+        font_size: Option<u32>,
+        #[serde(default)]
+        font_family: Option<String>,
+        #[serde(default)]
+        max_width: Option<u32>,
+        #[serde(default)]
+        shadow: Option<bool>,
     },
     Point {
         point: Point,
@@ -52,11 +66,41 @@ impl OverlaySpec {
         }
         for e in &self.elements {
             let (p, region, color) = match e {
-                OverlayElement::Box { region, color }
-                | OverlayElement::Circle { region, color } => (None, Some(region), color),
-                OverlayElement::Label { point, text, color } => {
+                OverlayElement::Box {
+                    region,
+                    color,
+                    fill_color,
+                    stroke_width,
+                    border_radius,
+                } => {
+                    if fill_color.is_some_and(|c| c == 0 || c > 0xffffff)
+                        || stroke_width.is_some_and(|v| v > 8)
+                        || border_radius.is_some_and(|v| v > 32)
+                    {
+                        return Err("invalid overlay box style".into());
+                    }
+                    (None, Some(region), color)
+                }
+                OverlayElement::Circle { region, color } => (None, Some(region), color),
+                OverlayElement::Label {
+                    point,
+                    text,
+                    color,
+                    font_size,
+                    font_family,
+                    max_width,
+                    ..
+                } => {
                     if text.len() > 4096 || text.contains('\0') {
                         return Err("invalid overlay label".into());
+                    }
+                    if font_size.is_some_and(|v| !(8..=48).contains(&v))
+                        || max_width.is_some_and(|v| !(16..=1024).contains(&v))
+                        || font_family
+                            .as_ref()
+                            .is_some_and(|v| v.is_empty() || v.len() > 64 || v.contains('\0'))
+                    {
+                        return Err("invalid overlay label style".into());
                     }
                     (Some(point), None, color)
                 }
@@ -92,6 +136,14 @@ impl OverlaySpec {
 }
 
 #[cfg(not(windows))]
+pub fn annotate_capture(
+    _: crate::model::Capture,
+    _: &OverlaySpec,
+) -> Result<crate::model::Capture> {
+    Err("overlay annotation is unavailable on this platform".into())
+}
+
+#[cfg(not(windows))]
 pub struct Overlay;
 #[cfg(not(windows))]
 impl Overlay {
@@ -119,6 +171,82 @@ mod native {
     };
 
     type Handle = *mut c_void;
+
+    /// Paint an overlay onto an in-memory capture without creating a window.
+    pub fn annotate_capture(
+        mut capture: crate::model::Capture,
+        spec: &OverlaySpec,
+    ) -> Result<crate::model::Capture> {
+        use windows::Win32::Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
+            DIB_RGB_COLORS, DeleteDC, DeleteObject as DeleteGdiObject, GdiFlush, HGDIOBJ,
+        };
+        spec.validate()?;
+        let (w, h) = (
+            i32::try_from(capture.width).map_err(|_| "invalid capture width")?,
+            i32::try_from(capture.height).map_err(|_| "invalid capture height")?,
+        );
+        let len = (capture.width as usize)
+            .checked_mul(capture.height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .filter(|&n| n > 0 && n <= 256 * 1024 * 1024)
+            .ok_or("invalid capture size")?;
+        if w <= 0 || h <= 0 || capture.bgra.len() != len {
+            return Err("invalid capture dimensions or pixels".into());
+        }
+        unsafe {
+            let dc = CreateCompatibleDC(None);
+            if dc.0.is_null() {
+                return Err("annotation DC creation failed".into());
+            }
+            let mut info = BITMAPINFO::default();
+            info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            info.bmiHeader.biWidth = w;
+            info.bmiHeader.biHeight = -h;
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            info.bmiHeader.biCompression = BI_RGB.0;
+            let mut bits = null_mut();
+            let bitmap = match CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+                Ok(bitmap) => bitmap,
+                Err(e) => {
+                    let _ = DeleteDC(dc);
+                    return Err(format!("annotation bitmap creation: {e}").into());
+                }
+            };
+            let old = SelectObject(dc.0, bitmap.0);
+            if old.is_null() || old as isize == -1 || bits.is_null() {
+                if !old.is_null() && old as isize != -1 {
+                    SelectObject(dc.0, old);
+                }
+                let _ = DeleteGdiObject(HGDIOBJ(bitmap.0));
+                let _ = DeleteDC(dc);
+                return Err("annotation surface selection failed".into());
+            }
+            std::ptr::copy_nonoverlapping(capture.bgra.as_ptr(), bits.cast::<u8>(), len);
+            paint(
+                dc.0,
+                Rect {
+                    left: 0,
+                    top: 0,
+                    right: w,
+                    bottom: h,
+                },
+                spec,
+            );
+            let flushed = GdiFlush().as_bool();
+            if flushed {
+                std::ptr::copy_nonoverlapping(bits.cast::<u8>(), capture.bgra.as_mut_ptr(), len);
+            }
+            SelectObject(dc.0, old);
+            let _ = DeleteGdiObject(HGDIOBJ(bitmap.0));
+            let _ = DeleteDC(dc);
+            if !flushed {
+                return Err("annotation drawing failed".into());
+            }
+        }
+        Ok(capture)
+    }
     #[repr(C)]
     #[derive(Default, Clone, Copy)]
     struct Rect {
@@ -228,6 +356,23 @@ mod native {
         fn GetStockObject(index: i32) -> Handle;
         fn Rectangle(dc: Handle, l: i32, t: i32, r: i32, b: i32) -> i32;
         fn Ellipse(dc: Handle, l: i32, t: i32, r: i32, b: i32) -> i32;
+        fn RoundRect(dc: Handle, l: i32, t: i32, r: i32, b: i32, w: i32, h: i32) -> i32;
+        fn CreateFontW(
+            height: i32,
+            width: i32,
+            escapement: i32,
+            orientation: i32,
+            weight: i32,
+            italic: u32,
+            underline: u32,
+            strikeout: u32,
+            charset: u32,
+            output: u32,
+            clip: u32,
+            quality: u32,
+            pitch: u32,
+            family: *const u16,
+        ) -> Handle;
         fn SetTextColor(dc: Handle, color: u32) -> u32;
         fn SetBkMode(dc: Handle, mode: i32) -> i32;
     }
@@ -345,11 +490,12 @@ mod native {
     }
     unsafe fn paint(dc: Handle, r: Rect, spec: &OverlaySpec) {
         unsafe {
+            let mut fonts = std::collections::HashMap::<(u32, String), Handle>::new();
             let w = r.right.max(1) as f64;
             let h = r.bottom.max(1) as f64;
             SetBkMode(dc, 1);
             if let Some(s) = &spec.status {
-                draw_text(dc, s, 8, 8, 0xffffff);
+                draw_text(dc, s, 8, 8, 0xffffff, None);
             }
             for e in &spec.elements {
                 let color = match e {
@@ -360,13 +506,78 @@ mod native {
                 };
                 let c = ((color & 255) << 16) | (color & 0xff00) | ((color >> 16) & 255);
                 match e {
-                    OverlayElement::Label { point, text, .. } => {
-                        draw_text(dc, text, (point.x * w) as i32, (point.y * h) as i32, c)
+                    OverlayElement::Label {
+                        point,
+                        text,
+                        font_size,
+                        font_family,
+                        max_width,
+                        shadow,
+                        ..
+                    } => {
+                        let font = if font_size.is_some() || font_family.is_some() {
+                            let key = (
+                                font_size.unwrap_or(16),
+                                font_family.clone().unwrap_or_default(),
+                            );
+                            *fonts.entry(key.clone()).or_insert_with(|| {
+                                CreateFontW(
+                                    -(key.0 as i32),
+                                    0,
+                                    0,
+                                    0,
+                                    400,
+                                    0,
+                                    0,
+                                    0,
+                                    1,
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    wide(&key.1).as_ptr(),
+                                )
+                            })
+                        } else {
+                            null_mut()
+                        };
+                        let old = if font.is_null() {
+                            null_mut()
+                        } else {
+                            SelectObject(dc, font)
+                        };
+                        let (x, y) = ((point.x * w) as i32, (point.y * h) as i32);
+                        if shadow.unwrap_or(false) {
+                            draw_text(dc, text, x + 1, y + 1, 0x010101, *max_width);
+                        }
+                        draw_text(dc, text, x, y, c, *max_width);
+                        if !old.is_null() {
+                            SelectObject(dc, old);
+                        }
                     }
                     OverlayElement::Box { region, .. } | OverlayElement::Circle { region, .. } => {
-                        let pen = CreatePen(0, 2, c);
+                        let (fill, width, radius) = match e {
+                            OverlayElement::Box {
+                                fill_color,
+                                stroke_width,
+                                border_radius,
+                                ..
+                            } => (
+                                *fill_color,
+                                stroke_width.unwrap_or(2),
+                                border_radius.unwrap_or(0),
+                            ),
+                            _ => (None, 2, 0),
+                        };
+                        let pen = CreatePen(if width == 0 { 5 } else { 0 }, width as i32, c);
                         let old = SelectObject(dc, pen);
-                        let brush = SelectObject(dc, GetStockObject(5));
+                        let fill_brush = fill.map(|color| {
+                            CreateSolidBrush(
+                                ((color & 255) << 16) | (color & 0xff00) | ((color >> 16) & 255),
+                            )
+                        });
+                        let brush =
+                            SelectObject(dc, fill_brush.unwrap_or_else(|| GetStockObject(5)));
                         let (x, y, x2, y2) = (
                             (region.x * w) as i32,
                             (region.y * h) as i32,
@@ -374,11 +585,26 @@ mod native {
                             ((region.y + region.height) * h) as i32,
                         );
                         if matches!(e, OverlayElement::Box { .. }) {
-                            Rectangle(dc, x, y, x2, y2);
+                            if radius == 0 {
+                                Rectangle(dc, x, y, x2, y2);
+                            } else {
+                                RoundRect(
+                                    dc,
+                                    x,
+                                    y,
+                                    x2,
+                                    y2,
+                                    (radius * 2) as i32,
+                                    (radius * 2) as i32,
+                                );
+                            }
                         } else {
                             Ellipse(dc, x, y, x2, y2);
                         }
                         SelectObject(dc, brush);
+                        if let Some(fill_brush) = fill_brush {
+                            DeleteObject(fill_brush);
+                        }
                         SelectObject(dc, old);
                         DeleteObject(pen);
                     }
@@ -394,19 +620,42 @@ mod native {
                     }
                 }
             }
+            for font in fonts.into_values() {
+                if !font.is_null() {
+                    DeleteObject(font);
+                }
+            }
         }
     }
-    unsafe fn draw_text(dc: Handle, text: &str, x: i32, y: i32, color: u32) {
+    unsafe fn draw_text(
+        dc: Handle,
+        text: &str,
+        x: i32,
+        y: i32,
+        color: u32,
+        max_width: Option<u32>,
+    ) {
         unsafe {
             SetTextColor(dc, color);
             let s = wide(text);
             let mut r = Rect {
                 left: x,
                 top: y,
-                right: x + 4096,
+                right: x + max_width.unwrap_or(4096) as i32,
                 bottom: y + 1024,
             };
-            DrawTextW(dc, s.as_ptr(), -1, &mut r, 0x00000000 | 0x00000800);
+            DrawTextW(
+                dc,
+                s.as_ptr(),
+                -1,
+                &mut r,
+                0x00000800
+                    | if max_width.is_some() {
+                        0x20 | 0x8000
+                    } else {
+                        0
+                    },
+            );
         }
     }
     fn run(target: Target, rx: mpsc::Receiver<Command>, ready: mpsc::SyncSender<Result<()>>) {
@@ -521,6 +770,81 @@ mod native {
             DestroyWindow(w);
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn styled_label_is_bounded_and_legacy_specs_remain_valid() {
+            let legacy: OverlaySpec = serde_json::from_str(r#"{"elements":[{"type":"box","region":{"x":0.0,"y":0.0,"width":0.5,"height":0.5},"color":16777215},{"type":"label","point":{"x":0.0,"y":0.0},"text":"hello","color":16777215}]}"#).unwrap();
+            legacy.validate().unwrap();
+            let styled: OverlaySpec = serde_json::from_str(r#"{"elements":[{"type":"label","point":{"x":0.0,"y":0.0},"text":"A long label that must fit","color":16777215,"font_size":16,"font_family":"Arial","max_width":32,"shadow":true}]}"#).unwrap();
+            let image = annotate_capture(
+                crate::model::Capture {
+                    width: 96,
+                    height: 32,
+                    bgra: vec![20; 96 * 32 * 4],
+                },
+                &styled,
+            )
+            .unwrap();
+            assert!(image.bgra.chunks_exact(4).any(|p| p[..3] != [20; 3]));
+            for y in 0..32 {
+                for x in 33..96 {
+                    let i = (y * 96 + x) * 4;
+                    assert_eq!(&image.bgra[i..i + 3], &[20; 3]);
+                }
+            }
+            let invalid: OverlaySpec = serde_json::from_str(r#"{"elements":[{"type":"label","point":{"x":0.0,"y":0.0},"text":"x","color":1,"font_size":49}]}"#).unwrap();
+            assert!(invalid.validate().is_err());
+        }
+        #[test]
+        fn annotation_renders_onto_capture_and_checks_shape() {
+            let capture = crate::model::Capture {
+                width: 64,
+                height: 64,
+                bgra: vec![20; 64 * 64 * 4],
+            };
+            let spec = OverlaySpec {
+                elements: vec![
+                    OverlayElement::Box {
+                        region: Region {
+                            x: 0.1,
+                            y: 0.1,
+                            width: 0.4,
+                            height: 0.4,
+                        },
+                        color: 0xff0000,
+                        fill_color: Some(0x151719),
+                        stroke_width: Some(2),
+                        border_radius: Some(4),
+                    },
+                    OverlayElement::Point {
+                        point: Point { x: 0.75, y: 0.75 },
+                        color: 0x00ff00,
+                    },
+                ],
+                ..Default::default()
+            };
+            let image = annotate_capture(capture, &spec).unwrap();
+            assert_eq!(&image.bgra[..4], &[20; 4]);
+            let inside = (12 * 64 + 12) * 4;
+            assert_eq!(&image.bgra[inside..inside + 3], &[0x19, 0x17, 0x15]);
+            assert!(image.bgra.chunks_exact(4).any(|p| p[..3] == [0, 0, 255]));
+            assert!(image.bgra.chunks_exact(4).any(|p| p[..3] == [0, 255, 0]));
+            assert!(
+                annotate_capture(
+                    crate::model::Capture {
+                        width: 1,
+                        height: 1,
+                        bgra: vec![]
+                    },
+                    &spec
+                )
+                .is_err()
+            );
+        }
+    }
 }
 #[cfg(windows)]
-pub use native::Overlay;
+pub use native::{Overlay, annotate_capture};

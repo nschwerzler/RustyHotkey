@@ -20,11 +20,13 @@ fn mock_rpc_runs_engine_without_a_live_target() {
     ));
     fs::create_dir_all(&dir).unwrap();
     let profile = json!({"schema_version":1,"target":{"window_class":"FixtureOnly","window_title":null},"controls":{"abort":112,"reset":113,"pause":114,"resume":115},"tick_ms":10,"rules":[]});
-    let observation = json!({"target_present":true,"focused":true,"keys_down":[],"pixels":[],"clipboard":"ready","ocr":[],"cursor":{"x":0.5,"y":0.5},"screenshot":{"width":2,"height":2,"solid_color":null,"bgra":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]}});
+    let observation = json!({"target_present":true,"focused":true,"keys_down":[],"pixels":[{"point":{"x":0.5,"y":0.5},"color":123}],"clipboard":"ready","ocr":[],"cursor":{"x":0.5,"y":0.5},"screenshot":{"width":2,"height":2,"solid_color":null,"bgra":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]}});
     let profile_path = dir.join("profile.json");
     let observation_path = dir.join("observation.json");
     let widget_path = dir.join("widget.lua");
     let crop_path = dir.join("crop.bmp");
+    let debug_path = dir.join("debug.bmp");
+    let debug_widget = dir.join("debug.lua");
     fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).unwrap();
     fs::write(&observation_path, serde_json::to_vec(&observation).unwrap()).unwrap();
     fs::write(
@@ -32,6 +34,7 @@ fn mock_rpc_runs_engine_without_a_live_target() {
         "return function(s) return {status=s.state.label} end",
     )
     .unwrap();
+    fs::write(&debug_widget, "return function(s) return {elements={{type='box',region={x=0.1,y=0.1,width=0.5,height=0.5},color=16711680,fill_color=1382169}}} end").unwrap();
     let requests = [
         json!({"id":1,"op":"arm"}),
         json!({"id":2,"op":"execute","actions":[{"type":"key","key":65,"down":true}]}),
@@ -45,6 +48,14 @@ fn mock_rpc_runs_engine_without_a_live_target() {
         json!({"id":10,"op":"widgets","paths":[widget_path],"state":{"label":"Fixture"}}),
         json!({"id":11,"op":"widget_state","state":{"label":"Changed"}}),
         json!({"id":12,"op":"screenshot"}),
+        json!({"id":13,"op":"geometry"}),
+        json!({"id":14,"op":"observe_state","points":[{"x":0.5,"y":0.5}]}),
+        json!({"id":15,"op":"observe_state","points":[{"x":2,"y":0}]}),
+        json!({"id":16,"op":"observe","observation":{"target_present":true,"focused":false,"screenshot":{"width":2,"height":2,"solid_color":0}}}),
+        json!({"id":17,"op":"observe_state","points":[{"x":0.5,"y":0.5}]}),
+        json!({"id":18,"op":"observe","observation":{"target_present":true,"focused":true,"screenshot":{"width":64,"height":64,"solid_color":0}}}),
+        json!({"id":19,"op":"widgets","paths":[debug_widget],"state":{}}),
+        json!({"id":20,"op":"debug_screenshot","path":debug_path}),
     ];
     let mut child = Command::new(env!("CARGO_BIN_EXE_rhk"))
         .arg("mock-rpc")
@@ -69,7 +80,7 @@ fn mock_rpc_runs_engine_without_a_live_target() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(lines.len(), 13);
+    assert_eq!(lines.len(), 21);
     assert_eq!(lines[0]["ok"], false);
     let reply = |id: u64| lines.iter().find(|line| line["id"] == id).unwrap();
     assert_eq!(reply(1)["ok"], true);
@@ -94,5 +105,25 @@ fn mock_rpc_runs_engine_without_a_live_target() {
         "default mock captures must be cleaned up"
     );
     assert_eq!(reply(12)["result"]["simulated"], true);
+    assert_eq!(
+        reply(13)["result"],
+        json!({"width":2,"height":2,"screen_x":0,"screen_y":0,"simulated":true})
+    );
+    assert_eq!(reply(14)["result"]["pixels"][0]["color"], 123);
+    assert_eq!(reply(14)["result"]["geometry"]["width"], 2);
+    assert_eq!(reply(15)["ok"], false);
+    assert_eq!(reply(17)["result"]["pixels"], json!([]));
+    assert_eq!(reply(17)["result"]["status"]["focused"], false);
+    #[cfg(windows)]
+    {
+        assert_eq!(reply(20)["ok"], true);
+        assert_eq!(reply(20)["result"]["width"], 64);
+        let image = fs::read(&debug_path).unwrap();
+        assert_eq!(&image[..2], b"BM");
+        assert!(image[54..].chunks_exact(4).any(|p| p[..3] == [0, 0, 255]));
+        assert_eq!(reply(20)["result"]["simulated"], true);
+    }
+    #[cfg(not(windows))]
+    assert_eq!(reply(20)["ok"], false);
     fs::remove_dir_all(dir).unwrap();
 }

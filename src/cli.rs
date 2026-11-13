@@ -276,6 +276,14 @@ fn mock_rpc(args: &[String]) -> Result<()> {
                     Ok(render_mock_widgets(&mut widgets,&widget_state,session.engine.status()))
                 }
                 "render_widgets" => Ok(render_mock_widgets(&mut widgets,&widget_state,session.engine.status())),
+                "debug_screenshot" => {
+                    if request.get("path").and_then(Value::as_str).is_none() {
+                        capture_index += 1;
+                        request["path"] = json!(dir.join("captures").join(format!("debug-{capture_index}.bmp")));
+                    }
+                    let rendered = widgets.render(&json!({"engine":session.engine.status(),"state":widget_state}));
+                    debug_screenshot(&mut session.engine, &request, rendered)
+                }
                 "clear_widgets" => {
                     widgets = crate::lua::WidgetManager::new(&[] as &[&Path]);
                     Ok(json!({"cleared":true}))
@@ -396,6 +404,43 @@ fn dispatch<B: Backend>(engine: &mut Engine<B>, request: &Value) -> Result<Value
             value["focused"] = json!(engine.backend.focused()?);
             Ok(value)
         }
+        "geometry" => Ok(json!(engine.backend.geometry()?)),
+        "observe_state" => {
+            let points: Vec<crate::model::Point> = request
+                .get("points")
+                .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
+                .transpose()?
+                .unwrap_or_default();
+            if points.len() > 64
+                || points.iter().any(|p| {
+                    !p.x.is_finite()
+                        || !p.y.is_finite()
+                        || !(0.0..=1.0).contains(&p.x)
+                        || !(0.0..=1.0).contains(&p.y)
+                })
+            {
+                return Err("points must contain at most 64 normalized coordinates".into());
+            }
+            let mut status = engine.status();
+            status["present"] = json!(engine.backend.target_present()?);
+            let focused = engine.backend.focused()?;
+            status["focused"] = json!(focused);
+            let geometry = engine.backend.geometry()?;
+            let mut pixels = Vec::new();
+            if focused {
+                for point in points {
+                    pixels.push(json!({"point":point,"color":engine.backend.pixel(point)?}));
+                }
+                if !engine.backend.focused()? || engine.backend.geometry()? != geometry {
+                    return Err("target focus or geometry changed during observation".into());
+                }
+            }
+            Ok(json!({"status":status,"geometry":geometry,"pixels":pixels}))
+        }
+        "focus" => {
+            engine.focus_target()?;
+            Ok(engine.status())
+        }
         "arm" => {
             engine.arm()?;
             Ok(engine.status())
@@ -480,6 +525,32 @@ fn dispatch<B: Backend>(engine: &mut Engine<B>, request: &Value) -> Result<Value
         }
         _ => Err(format!("unknown operation {op:?}")),
     }
+}
+fn debug_screenshot<B: Backend>(
+    engine: &mut Engine<B>,
+    request: &Value,
+    rendered: crate::lua::WidgetRender,
+) -> Result<Value> {
+    let capture = engine.backend.screenshot(None)?;
+    let capture = crate::overlay::annotate_capture(capture, &rendered.spec)?;
+    let file = if let Some(path) = request.get("path").and_then(Value::as_str) {
+        PathBuf::from(path)
+    } else {
+        state_dir()?.join("captures").join(format!(
+            "debug-{}.bmp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos()
+        ))
+    };
+    write_bmp(&file, &capture)?;
+    let diagnostics: Vec<_> = rendered
+        .diagnostics
+        .iter()
+        .map(|d| json!({"path":d.path,"message":d.message}))
+        .collect();
+    Ok(json!({"width":capture.width,"height":capture.height,"path":file,"diagnostics":diagnostics}))
 }
 fn write_bmp(path: &Path, capture: &Capture) -> Result<()> {
     let size = capture
@@ -795,6 +866,12 @@ impl<B: Backend> RpcSession<B> {
                 self.engine.backend.sound(field(request, "cue")?)?;
                 Ok(json!({"played":true}))
             }
+            "debug_screenshot" => {
+                let rendered = self
+                    .widgets
+                    .render(&json!({"engine":self.engine.status(),"state":self.widget_state}));
+                debug_screenshot(&mut self.engine, request, rendered)
+            }
             "widget_state" => {
                 let state: Value = field(request, "state")?;
                 if !state.is_object() {
@@ -883,6 +960,13 @@ fn tool_catalog() -> Value {
             json!({"after":{"type":"integer","minimum":0}}),
             false,
         ),
+        ("geometry", json!({}), false),
+        (
+            "observe_state",
+            json!({"points":"array of Point (optional, maximum 64)"}),
+            false,
+        ),
+        ("focus", json!({}), true),
         ("arm", json!({}), true),
         ("pause", json!({}), false),
         ("abort", json!({}), false),
@@ -897,6 +981,7 @@ fn tool_catalog() -> Value {
             json!({"region?":"Region","path?":"string"}),
             false,
         ),
+        ("debug_screenshot", json!({"path?":"string"}), false),
         ("ocr", json!({"region?":"Region"}), false),
         ("hotkeys", json!({"enabled":"boolean"}), false),
         ("workflow", json!({"workflow":"Workflow"}), true),

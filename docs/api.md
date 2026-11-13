@@ -6,7 +6,7 @@ This is the public wire contract currently visible in `src/cli.rs`, `src/model.r
 
 `Point` is `{x:number,y:number}`. `Region` is `{x:number,y:number,width:number,height:number}`. A `Target` has optional `window_class` and `window_title`; at least one must be non-empty in a valid profile. A profile is `{schema_version:1,target,controls,tick_ms,rules?}`. Controls are distinct numeric `abort`, `reset`, `pause`, and `resume` keys. A rule has `name`, `condition`, `actions`, `cooldown_ms`, optional `delay_ms` (default `0`), and optional `enabled` (default `true`).
 
-Actions are tagged objects: `tap {key}`, `key {key,down}`, `move {x,y}`, `click {button}`, `button {button,down}`, `click_burst {button,count,interval_ms,lock_position}`, `scroll {delta,horizontal?}`, `text {text}`, `wait {ms}`, `pause`, `set_hotkeys {enabled}`, `toggle_hotkeys`, `sound {cue}`, or `notify {message,ttl_ms}`. Keys are virtual-key values in `1..=255`; mouse buttons are `1..=5`. A click burst has `1..=1000` clicks and a positive interval, with total duration capped at 24 hours. Scroll delta must be nonzero and at most 120,000 in magnitude; `horizontal` defaults to `false`. Sound cues are `default`, `info`, `warning`, and `error`. Rule delays and action waits are bounded to 24 hours.
+Actions are tagged objects: `tap {key}`, `key {key,down}`, `move {x,y}`, `click {button}`, `button {button,down}`, `click_burst {button,count,interval_ms,lock_position}`, `scroll {delta,horizontal?}`, `text {text}`, `wait {ms}`, `random_wait {min_ms,max_ms}`, `pause`, `set_hotkeys {enabled}`, `toggle_hotkeys`, `sound {cue}`, or `notify {message,ttl_ms}`. Keys are virtual-key values in `1..=255`; mouse buttons are `1..=5`. A click burst has `1..=1000` clicks and a positive interval, with total duration capped at 24 hours. Scroll delta must be nonzero and at most 120,000 in magnitude; `horizontal` defaults to `false`. Sound cues are `default`, `info`, `warning`, and `error`. Random waits sample inclusive integer milliseconds with `0 <= min_ms <= max_ms <= 1000`; workflow budgets use the maximum. Mock sessions use a fixed seed and input timestamps reflect the sampled delay. Rule delays and action waits are bounded to 24 hours.
 
 Conditions are `always`, `focused`, `key_down {key}`, `modifiers {shift?,control?,alt?,meta?}`, `pixel {point,color,tolerance}`, `pixel_pattern {point,pattern}`, `clipboard_contains {text}`, `ocr_contains {text,region?,case_sensitive?}`, or boolean `all {conditions}`, `any {conditions}`, `not {condition}`. OCR text must be non-empty and at most 4,096 bytes; an optional region is a positive normalized rectangle contained in `0..=1`. `case_sensitive` defaults to `false`. OCR joins recognized word text in reading order before searching and may be expensive on live backends, so use a workflow polling interval appropriate to the target and backend. A modifier condition must specify at least one boolean state. A pixel pattern has six characters, optionally prefixed by `#`; each character is a hex digit or `?`/`*` wildcard, for example `"A?**0F"`. A workflow is `{schema_version:1,steps:[...]}`; steps are `actions {actions}`, `wait_for {condition,timeout_ms,poll_ms}`, `assert {condition}`, or `repeat {count,steps}`. A recording is `{schema_version:1,events:[{at_ms,action}]}.
 
@@ -19,6 +19,9 @@ Start with `rhk rpc PROFILE`. Each request needs `op`; include an `id` to correl
 | op | additional fields | result |
 |---|---|---|
 | `status` | none | runtime state plus `focused` |
+| `geometry` | none | client `{width,height,screen_x,screen_y}` in pixels, without capture |
+| `observe_state` | optional `points` (up to 64 normalized points) | `{status,geometry,pixels}`; off-focus results contain no pixels |
+| `focus` | none | runtime state; explicitly request focus for the configured target |
 | `arm`, `pause`, `abort`, `tick` | none | runtime state |
 | `heartbeat` | none | `{alive:true}` |
 | `input_events` | optional `after` (nonnegative sequence) | bounded event snapshot and held keys |
@@ -27,6 +30,7 @@ Start with `rhk rpc PROFILE`. Each request needs `op`; include an `id` to correl
 | `pixel` | `point` | `{color:number}` |
 | `clipboard` | none | `{text:string}` |
 | `screenshot` | optional `region`, `path` | `{width,height,path}` |
+| `debug_screenshot` | optional `path` | `{width,height,path,diagnostics}` |
 | `ocr` | optional `region` | `{words:[{text,region}]}` |
 
 | `notify` | `message`, `ttl_ms` | `{shown:true}` |
@@ -34,12 +38,26 @@ Start with `rhk rpc PROFILE`. Each request needs `op`; include an `id` to correl
 | `hotkeys` | `enabled` | runtime state |
 | `workflow` | `workflow` | `{complete:true}` |
 
+`focus` restores a minimized target if needed and requests foreground focus. It
+returns an error if the target is missing or Windows refuses focus. It is an
+action tool, unavailable in observe-only or while abort is latched; it never
+arms the engine or clears abort. Python exposes it as `Client.focus()`.
+`Client.geometry()` is read-only and available in observe-only sessions. Mock
+geometry uses scripted screenshot dimensions with screen origin `(0, 0)`.
+`Client.observe_state(points)` batches status, geometry and pixel samples;
+focus or geometry changes during sampling cause an error.
+
 Windows capture uses the target's client area. If the window returns an entirely
 black frame, it retries from the visible desktop while the target is foreground.
 That fallback can include overlapping windows and fails if the region extends
 outside the desktop, focus changes, or the desktop result is entirely black.
 An intentionally black region can therefore produce a capture error. OCR uses the
 same capture path.
+OCR requires the target to remain foreground and rejects results when its window
+or client geometry changes during capture or recognition.
+`debug_screenshot` captures the full client and draws the current Lua widget
+specification into a separate BMP. It does not change live overlay capture
+exclusion or the image supplied to OCR. Widget diagnostics accompany the result.
 
 Runtime status includes `running` (loaded), `executing`, `armed`, `paused`,
 `abort_latched`, `held_keys`, `held_buttons`, `dormant`, `hotkeys_enabled`
